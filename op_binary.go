@@ -2,7 +2,7 @@ package gno
 
 import (
 	"fmt"
-	"reflect"
+	"math/big"
 )
 
 //----------------------------------------
@@ -45,7 +45,7 @@ func (m *Machine) doOpLor() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also the result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// set result in lv.
@@ -57,7 +57,7 @@ func (m *Machine) doOpLand() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also the result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// set result in lv.
@@ -71,7 +71,7 @@ func (m *Machine) doOpEql() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also the result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertEqualityTypes(lv.T, rv.T)
 	}
 
 	// set result in lv.
@@ -88,7 +88,7 @@ func (m *Machine) doOpNeq() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also the result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertEqualityTypes(lv.T, rv.T)
 	}
 
 	// set result in lv.
@@ -105,7 +105,7 @@ func (m *Machine) doOpLss() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also the result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// set the result in lv.
@@ -122,7 +122,7 @@ func (m *Machine) doOpLeq() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also the result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// set the result in lv.
@@ -139,7 +139,7 @@ func (m *Machine) doOpGtr() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also the result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// set the result in lv.
@@ -156,7 +156,7 @@ func (m *Machine) doOpGeq() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also the result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// set the result in lv.
@@ -173,7 +173,7 @@ func (m *Machine) doOpAdd() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// add rv to lv.
@@ -187,7 +187,7 @@ func (m *Machine) doOpSub() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// sub rv from lv.
@@ -201,7 +201,7 @@ func (m *Machine) doOpBor() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// lv | rv
@@ -215,7 +215,7 @@ func (m *Machine) doOpXor() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// lv ^ rv
@@ -229,7 +229,7 @@ func (m *Machine) doOpMul() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// lv * rv
@@ -243,7 +243,7 @@ func (m *Machine) doOpQuo() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// lv / rv
@@ -257,7 +257,7 @@ func (m *Machine) doOpRem() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// lv % rv
@@ -303,7 +303,7 @@ func (m *Machine) doOpBand() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// lv & rv
@@ -317,7 +317,7 @@ func (m *Machine) doOpBandn() {
 	rv := m.PopValue()
 	lv := m.PeekValue(1) // also result
 	if debug {
-		assertTypes(lv.T, rv.T)
+		assertSameTypes(lv.T, rv.T)
 	}
 
 	// lv &^ rv
@@ -327,35 +327,28 @@ func (m *Machine) doOpBandn() {
 //----------------------------------------
 // logic functions
 
-// TODO: document what class of problems its for.
-// One of them can be nil, and this lets uninitialized primitives and
-// others serve as empty values.  See doOpAdd()
-func assertTypes(lt, rt Type) {
-	if lt == nil && rt == nil {
-		panic("assertTypes() requires at least one type")
-	} else if lt == nil || rt == nil {
-		// one is nil.
-	} else if lt.Kind() == rt.Kind() &&
-		isUntyped(lt) || isUntyped(rt) {
-		// one is untyped of same kind.
-	} else if lt.TypeID() != rt.TypeID() {
-		panic(fmt.Sprintf(
-			"incompatible operands in binary expression: %s and %s",
-			lt.String(),
-			rt.String(),
-		))
-	} else {
-		// non-nil types are identical.
-	}
-}
-
 // TODO: can be much faster.
 func isEql(lv, rv *TypedValue) bool {
+	if lv.IsUndefined() {
+		return rv.IsUndefined()
+	}
+	if lnt, ok := lv.T.(*nativeType); ok {
+		if rnt, ok := rv.T.(*nativeType); ok {
+			if lnt.Type != rnt.Type {
+				return false
+			}
+			lrv := lv.V.(*nativeValue).Value.Interface()
+			rrv := rv.V.(*nativeValue).Value.Interface()
+			return lrv == rrv
+		} else {
+			return false
+		}
+	}
 	switch lv.T.Kind() {
 	case BoolKind:
 		return (lv.GetBool() == rv.GetBool())
 	case StringKind:
-		return (lv.V.(StringValue) == rv.V.(StringValue))
+		return (lv.GetString() == rv.GetString())
 	case IntKind:
 		return (lv.GetInt() == rv.GetInt())
 	case Int8Kind:
@@ -398,155 +391,181 @@ func isEql(lv, rv *TypedValue) bool {
 			}
 		}
 		return true
+	case MapKind:
+		if debug {
+			if lv.V != nil && rv.V != nil {
+				panic("map can only be compared with `nil`")
+			}
+		}
+		return lv.V == rv.V
+	case SliceKind:
+		if debug {
+			if lv.V != nil && rv.V != nil {
+				panic("slice can only be compared with `nil`")
+			}
+		}
+		return lv.V == rv.V
+	case FuncKind:
+		if debug {
+			if lv.V != nil && rv.V != nil {
+				panic("function can only be compared with `nil`")
+			}
+		}
+		return lv.V == rv.V
+	case PointerKind:
+		// TODO: assumes runtime instance normalization.
+		return lv.V == rv.V
+	case StructKind:
+		panic("NOT YET IMPLEMENTED")
 	default:
 		panic(fmt.Sprintf(
-			"comparison operator == not defined for %s kind",
-			KindOf(lv.T),
+			"comparison operator == not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
 
 // TODO: can be much faster.
 func isLss(lv, rv *TypedValue) bool {
-	switch baseOf(lv.T) {
-	case StringType:
+	switch lv.T.Kind() {
+	case StringKind:
 		return (lv.V.(StringValue) < rv.V.(StringValue))
-	case IntType:
+	case IntKind:
 		return (lv.GetInt() < rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		return (lv.GetInt8() < rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		return (lv.GetInt16() < rv.GetInt16())
-	case Int32Type:
+	case Int32Kind:
 		return (lv.GetInt32() < rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		return (lv.GetInt64() < rv.GetInt64())
-	case UintType:
+	case UintKind:
 		return (lv.GetUint() < rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		return (lv.GetUint8() < rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		return (lv.GetUint16() < rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		return (lv.GetUint32() < rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		return (lv.GetUint64() < rv.GetUint64())
-	case BigintType:
+	case BigintKind:
 		lb := lv.V.(BigintValue).V
 		rb := rv.V.(BigintValue).V
 		return lb.Cmp(rb) < 0
 	default:
 		panic(fmt.Sprintf(
-			"comparison operator < not defined for %s kind",
-			KindOf(lv.T),
+			"comparison operator < not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
 
 func isLeq(lv, rv *TypedValue) bool {
-	switch baseOf(lv.T) {
-	case StringType:
+	switch lv.T.Kind() {
+	case StringKind:
 		return (lv.V.(StringValue) <= rv.V.(StringValue))
-	case IntType:
+	case IntKind:
 		return (lv.GetInt() <= rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		return (lv.GetInt8() <= rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		return (lv.GetInt16() <= rv.GetInt16())
-	case Int32Type:
+	case Int32Kind:
 		return (lv.GetInt32() <= rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		return (lv.GetInt64() <= rv.GetInt64())
-	case UintType:
+	case UintKind:
 		return (lv.GetUint() <= rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		return (lv.GetUint8() <= rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		return (lv.GetUint16() <= rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		return (lv.GetUint32() <= rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		return (lv.GetUint64() <= rv.GetUint64())
-	case BigintType:
+	case BigintKind:
 		lb := lv.V.(BigintValue).V
 		rb := rv.V.(BigintValue).V
 		return lb.Cmp(rb) <= 0
 	default:
 		panic(fmt.Sprintf(
-			"comparison operator <= not defined for %s kind",
-			KindOf(lv.T),
+			"comparison operator <= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
 
 func isGtr(lv, rv *TypedValue) bool {
-	switch baseOf(lv.T) {
-	case StringType:
+	switch lv.T.Kind() {
+	case StringKind:
 		return (lv.V.(StringValue) > rv.V.(StringValue))
-	case IntType:
+	case IntKind:
 		return (lv.GetInt() > rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		return (lv.GetInt8() > rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		return (lv.GetInt16() > rv.GetInt16())
-	case Int32Type:
+	case Int32Kind:
 		return (lv.GetInt32() > rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		return (lv.GetInt64() > rv.GetInt64())
-	case UintType:
+	case UintKind:
 		return (lv.GetUint() > rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		return (lv.GetUint8() > rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		return (lv.GetUint16() > rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		return (lv.GetUint32() > rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		return (lv.GetUint64() > rv.GetUint64())
-	case BigintType:
+	case BigintKind:
 		lb := lv.V.(BigintValue).V
 		rb := rv.V.(BigintValue).V
 		return lb.Cmp(rb) > 0
 	default:
 		panic(fmt.Sprintf(
-			"comparison operator > not defined for %s kind",
-			KindOf(lv.T),
+			"comparison operator > not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
 
 func isGeq(lv, rv *TypedValue) bool {
-	switch baseOf(lv.T) {
-	case StringType:
+	switch lv.T.Kind() {
+	case StringKind:
 		return (lv.V.(StringValue) >= rv.V.(StringValue))
-	case IntType:
+	case IntKind:
 		return (lv.GetInt() >= rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		return (lv.GetInt8() >= rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		return (lv.GetInt16() >= rv.GetInt16())
-	case Int32Type:
+	case Int32Kind:
 		return (lv.GetInt32() >= rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		return (lv.GetInt64() >= rv.GetInt64())
-	case UintType:
+	case UintKind:
 		return (lv.GetUint() >= rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		return (lv.GetUint8() >= rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		return (lv.GetUint16() >= rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		return (lv.GetUint32() >= rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		return (lv.GetUint64() >= rv.GetUint64())
-	case BigintType:
+	case BigintKind:
 		lb := lv.V.(BigintValue).V
 		rb := rv.V.(BigintValue).V
 		return lb.Cmp(rb) >= 0
 	default:
 		panic(fmt.Sprintf(
-			"comparison operator >= not defined for %s kind",
-			KindOf(lv.T),
+			"comparison operator >= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -555,37 +574,37 @@ func isGeq(lv, rv *TypedValue) bool {
 func addAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case UntypedStringType, StringType:
-		lv.V = lv.GetString() + rv.GetString()
-	case IntType:
+	switch lv.T.Kind() {
+	case StringKind:
+		lv.V = StringValue(lv.GetString() + rv.GetString())
+	case IntKind:
 		lv.SetInt(lv.GetInt() + rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() + rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() + rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() + rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() + rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() + rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() + rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() + rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() + rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() + rv.GetUint64())
-	case UntypedBigintType, BigintType:
+	case BigintKind:
 		lb := lv.GetBig()
-		lb.Add(lb, rv.GetBig())
+		lb = big.NewInt(0).Add(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operator + not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operator + not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -594,34 +613,35 @@ func addAssign(lv, rv *TypedValue) {
 func subAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() - rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() - rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() - rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() - rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() - rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() - rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() - rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() - rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() - rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() - rv.GetUint64())
-	case UntypedBigintType, BigintType:
-		panic("not yet implemented")
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).Sub(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators - and -= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators - and -= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -630,34 +650,35 @@ func subAssign(lv, rv *TypedValue) {
 func mulAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() * rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() * rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() * rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() * rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() * rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() * rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() * rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() * rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() * rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() * rv.GetUint64())
-	case UntypedBigintType, BigintType:
-		panic("not yet implemented")
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).Mul(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators * and *= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators * and *= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -666,34 +687,35 @@ func mulAssign(lv, rv *TypedValue) {
 func quoAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() / rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() / rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() / rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() / rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() / rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() / rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() / rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() / rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() / rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() / rv.GetUint64())
-	case UntypedBigintType, BigintType:
-		panic("not yet implemented")
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).Quo(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators / and /= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators / and /= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -702,34 +724,35 @@ func quoAssign(lv, rv *TypedValue) {
 func remAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() % rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() % rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() % rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() % rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() % rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() % rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() % rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() % rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() % rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() % rv.GetUint64())
-	case UntypedBigintType, BigintType:
-		panic("not yet implemented")
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).Rem(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators %% and %%= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators %% and %%= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -738,34 +761,35 @@ func remAssign(lv, rv *TypedValue) {
 func bandAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() & rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() & rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() & rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() & rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() & rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() & rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() & rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() & rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() & rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() & rv.GetUint64())
-	case UntypedBigintType, BigintType:
-		panic("not yet implemented")
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).And(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators & and &= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators & and &= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -774,34 +798,35 @@ func bandAssign(lv, rv *TypedValue) {
 func bandnAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() &^ rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() &^ rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() &^ rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() &^ rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() &^ rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() &^ rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() &^ rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() &^ rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() &^ rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() &^ rv.GetUint64())
-	case UntypedBigintType, BigintType:
-		panic("not yet implemented")
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).AndNot(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators &^ and &^= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators &^ and &^= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -810,34 +835,35 @@ func bandnAssign(lv, rv *TypedValue) {
 func borAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() | rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() | rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() | rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() | rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() | rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() | rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() | rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() | rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() | rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() | rv.GetUint64())
-	case UntypedBigintType, BigintType:
-		panic("not yet implemented")
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).Or(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators | and |= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators | and |= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -846,34 +872,35 @@ func borAssign(lv, rv *TypedValue) {
 func xorAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE this block is replicated in op_assign.go
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() ^ rv.GetInt())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() ^ rv.GetInt8())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() ^ rv.GetInt16())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() ^ rv.GetInt32())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() ^ rv.GetInt64())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() ^ rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() ^ rv.GetUint8())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() ^ rv.GetUint16())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() ^ rv.GetUint32())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() ^ rv.GetUint64())
-	case UntypedBigintType, BigintType:
-		panic("not yet implemented")
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).Xor(lb, rv.GetBig())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators ^ and ^= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators ^ and ^= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -882,35 +909,35 @@ func xorAssign(lv, rv *TypedValue) {
 func shlAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE: baseOf(rv.T) is always UintType.
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() << rv.GetUint())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() << rv.GetUint())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() << rv.GetUint())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() << rv.GetUint())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() << rv.GetUint())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() << rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() << rv.GetUint())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() << rv.GetUint())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() << rv.GetUint())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() << rv.GetUint())
-	case UntypedBigintType, BigintType:
-		lbi := lv.V.(BigintValue).V
-		lbi.Lsh(lbi, rv.GetUint())
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).Lsh(lb, rv.GetUint())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators << and <<= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators << and <<= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }
@@ -919,35 +946,35 @@ func shlAssign(lv, rv *TypedValue) {
 func shrAssign(lv, rv *TypedValue) {
 	// set the result in lv.
 	// NOTE: baseOf(rv.T) is always UintType.
-	switch baseOf(lv.T) {
-	case IntType:
+	switch lv.T.Kind() {
+	case IntKind:
 		lv.SetInt(lv.GetInt() >> rv.GetUint())
-	case Int8Type:
+	case Int8Kind:
 		lv.SetInt8(lv.GetInt8() >> rv.GetUint())
-	case Int16Type:
+	case Int16Kind:
 		lv.SetInt16(lv.GetInt16() >> rv.GetUint())
-	case UntypedRuneType, Int32Type:
+	case Int32Kind:
 		lv.SetInt32(lv.GetInt32() >> rv.GetUint())
-	case Int64Type:
+	case Int64Kind:
 		lv.SetInt64(lv.GetInt64() >> rv.GetUint())
-	case UintType:
+	case UintKind:
 		lv.SetUint(lv.GetUint() >> rv.GetUint())
-	case Uint8Type:
+	case Uint8Kind:
 		lv.SetUint8(lv.GetUint8() >> rv.GetUint())
-	case Uint16Type:
+	case Uint16Kind:
 		lv.SetUint16(lv.GetUint16() >> rv.GetUint())
-	case Uint32Type:
+	case Uint32Kind:
 		lv.SetUint32(lv.GetUint32() >> rv.GetUint())
-	case Uint64Type:
+	case Uint64Kind:
 		lv.SetUint64(lv.GetUint64() >> rv.GetUint())
-	case UntypedBigintType, BigintType:
-		lbi := lv.V.(BigintValue).V
-		lbi.Rsh(lbi, rv.GetUint())
+	case BigintKind:
+		lb := lv.GetBig()
+		lb = big.NewInt(0).Rsh(lb, rv.GetUint())
+		lv.V = BigintValue{V: lb}
 	default:
 		panic(fmt.Sprintf(
-			"operators >> and >>= not defined for %s kind %s",
-			KindOf(lv.T),
-			reflect.TypeOf(baseOf(lv.T)),
+			"operators >> and >>= not defined for %s",
+			lv.T.Kind(),
 		))
 	}
 }

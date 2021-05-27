@@ -1,8 +1,9 @@
-package interp_test
+package tests
 
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 
 	//"go/build"
 	"go/parser"
@@ -16,10 +17,12 @@ import (
 	"github.com/gnolang/gno"
 )
 
-func TestFile(t *testing.T) {
+func TestFileStr(t *testing.T) {
 	filePath := "./files/str.go"
 	runCheck(t, filePath)
+}
 
+func TestFiles(t *testing.T) {
 	baseDir := filepath.Join(".", "files")
 	files, err := ioutil.ReadDir(baseDir)
 	if err != nil {
@@ -37,18 +40,12 @@ func TestFile(t *testing.T) {
 }
 
 func runCheck(t *testing.T, path string) {
-	pkgPath, goPath, resWanted, errWanted, rops := wantedFromComment(path)
+	pkgPath, resWanted, errWanted, rops := wantedFromComment(path)
 	if pkgPath == "" {
 		pkgPath = "main"
 	}
 	realmer := testRealmer(pkgPath) // may be nil.
 	pkgName := defaultPkgName(pkgPath)
-	if goPath != "" {
-		// See original Yaegi repo;
-		// used to import the files in the goPath
-		// to be imported in testfiles.
-		panic("TODO")
-	}
 	pn := gno.NewPackageNode(pkgName, pkgPath, &gno.FileSet{})
 	pv := pn.NewPackage(realmer)
 
@@ -98,6 +95,7 @@ func runCheck(t *testing.T, path string) {
 			if !strings.Contains(err, errWanted) {
 				panic(fmt.Sprintf("got %q, want: %q", err, errWanted))
 			}
+			return // nothing more to do.
 		} else {
 			if pnc != nil {
 				panic(fmt.Sprintf("got unexpected error: %v", pnc))
@@ -136,7 +134,7 @@ func runCheck(t *testing.T, path string) {
 	}
 }
 
-func wantedFromComment(p string) (pkgPath, goPath, res, err, rops string) {
+func wantedFromComment(p string) (pkgPath, res, err, rops string) {
 	fset := token.NewFileSet()
 	f, err2 := parser.ParseFile(fset, p, nil, parser.ParseComments)
 	if err2 != nil {
@@ -152,13 +150,20 @@ func wantedFromComment(p string) (pkgPath, goPath, res, err, rops string) {
 			pkgPath = strings.TrimSpace(strings.TrimPrefix(line, "PKGPATH:"))
 		} else if strings.HasPrefix(text, "GOPATH:") {
 			line := strings.SplitN(text, "\n", 2)[0]
-			goPath = strings.TrimSpace(strings.TrimPrefix(line, "GOPATH:"))
+			goPath := strings.TrimSpace(strings.TrimPrefix(line, "GOPATH:"))
+			panic(fmt.Sprintf(
+				"GOPATH directive not supported -- move %s to extern",
+				goPath))
 		} else if strings.HasPrefix(text, "Output:\n") {
 			res = strings.TrimPrefix(text, "Output:\n")
 			res = strings.TrimSpace(res)
 		} else if strings.HasPrefix(text, "Error:\n") {
 			err = strings.TrimPrefix(text, "Error:\n")
 			err = strings.TrimSpace(err)
+			// XXX temporary until we support line:column.
+			// If error starts with line:column, trim it.
+			re := regexp.MustCompile(`^[0-9]+:[0-9]+: `)
+			err = re.ReplaceAllString(err, "")
 		} else if strings.HasPrefix(text, "Realm:\n") {
 			rops = strings.TrimPrefix(text, "Realm:\n")
 			rops = strings.TrimSpace(rops)

@@ -37,10 +37,18 @@ accordance with this agreement.
 
 You may keep any number of copies of this project for your personal purposes as
 long as it isn't for any for-profit, commercial, religious, government, NGO, or
-public blockchain purposes.
+distributed ledger (blockchain) purposes.
 
 THE WORKS ARE PROVIDED WITHOUT WARRANTY OF CORRECTNESS. IN NO EVENT SHALL THE
 AUTHORS, COPYRIGHT HOLDERS, OWNERS, OR MAINTAINERS BE LIABLE FOR ANY CLAIM,
 DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE WORK OR THE USE OR
 OTHER DEALINGS IN THE WORK.
+
+In the case that (and only if) all of the owners as stated by this project
+become incapacitated, the rights of all the works is to be published under a
+modified version of the AGPL3.0 license (ONLY) where the "Free Software
+Foundation" is replaced with the "Gno Foundation" as defined by the heirs of
+the works, and the "GNU Affero General Public License" replaced with the "GNO
+General Public License".  This clause may be updated by the project owners at
+any time, but not its heirs.

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 //----------------------------------------
@@ -36,7 +37,11 @@ func (tid TypeID) String() string {
 func typeid(f string, args ...interface{}) (tid TypeID) {
 	fs := fmt.Sprintf(f, args...)
 	hb := HashBytes([]byte(fs))
-	return TypeID(hb)
+	x := TypeID(hb)
+	if debug {
+		debug.Println("TYPEID", fs, "->", x.String())
+	}
+	return x
 }
 
 // Complex types are pointers, but due to the design goal
@@ -44,7 +49,7 @@ func typeid(f string, args ...interface{}) (tid TypeID) {
 // cannot use pointer equality to test for type equality.
 // Instead, for checking equalty use the TypeID.
 func (PrimitiveType) assertType()  {}
-func (PointerType) assertType()    {}
+func (*PointerType) assertType()   {}
 func (FieldType) assertType()      {}
 func (*ArrayType) assertType()     {}
 func (*SliceType) assertType()     {}
@@ -58,6 +63,7 @@ func (*PackageType) assertType()   {}
 func (*ChanType) assertType()      {}
 func (*nativeType) assertType()    {}
 func (blockType) assertType()      {}
+func (*tupleType) assertType()     {}
 
 //----------------------------------------
 // Primitive types
@@ -185,7 +191,9 @@ func (pt PrimitiveType) String() string {
 		return string("int8")
 	case Int16Type:
 		return string("int16")
-	case UntypedRuneType, Int32Type:
+	case UntypedRuneType:
+		return string("<untyped> int32")
+	case Int32Type:
 		return string("int32")
 	case Int64Type:
 		return string("int64")
@@ -209,7 +217,12 @@ func (pt PrimitiveType) String() string {
 }
 
 func (pt PrimitiveType) Elem() Type {
-	panic("primitive types have no elements")
+	if pt.Kind() == StringKind {
+		// NOTE: this is different than Go1.
+		return Uint8Type
+	} else {
+		panic("non-string primitive types have no elements")
+	}
 }
 
 //----------------------------------------
@@ -220,7 +233,7 @@ type Tag string
 type FieldType struct {
 	Name     Name
 	Type     Type
-	Embedded Name
+	Embedded bool
 	Tag      Tag
 }
 
@@ -283,7 +296,7 @@ func (l FieldTypeList) TypeID() TypeID {
 		if ft.Name == "" {
 			s += ft.Type.TypeID().String()
 		} else {
-			s += string(ft.Name) + ":" + ft.Type.TypeID().String()
+			s += string(ft.Name) + "#" + ft.Type.TypeID().String()
 		}
 		if i != ll-1 {
 			s += ","
@@ -301,9 +314,9 @@ func (l FieldTypeList) TypeIDForPackage(pkgPath string) TypeID {
 	for i, ft := range l {
 		fn := ft.Name
 		if isUpper(string(fn)) {
-			s += string(fn) + ":" + ft.Type.TypeID().String()
+			s += string(fn) + "#" + ft.Type.TypeID().String()
 		} else {
-			s += pkgPath + "." + string(fn) + ":" + ft.Type.TypeID().String()
+			s += pkgPath + "." + string(fn) + "#" + ft.Type.TypeID().String()
 		}
 		if i != ll-1 {
 			s += ","
@@ -314,6 +327,12 @@ func (l FieldTypeList) TypeIDForPackage(pkgPath string) TypeID {
 
 func (l FieldTypeList) HasUnexported() bool {
 	for _, ft := range l {
+		if debug {
+			if ft.Name == "" {
+				// incorrect usage.
+				panic("should not happen")
+			}
+		}
 		if !isUpper(string(ft.Name)) {
 			return true
 		}
@@ -325,7 +344,7 @@ func (l FieldTypeList) String() string {
 	ll := len(l)
 	s := ""
 	for i, ft := range l {
-		s += string(ft.Name) + ":" + ft.Type.TypeID().String()
+		s += string(ft.Name) + "#" + ft.Type.TypeID().String()
 		if i != ll-1 {
 			s += ";"
 		}
@@ -337,7 +356,7 @@ func (l FieldTypeList) StringWithCommas() string {
 	ll := len(l)
 	s := ""
 	for i, ft := range l {
-		s += string(ft.Name) + ":" + ft.Type.TypeID().String()
+		s += string(ft.Name) + "#" + ft.Type.String()
 		if i != ll-1 {
 			s += ","
 		}
@@ -357,6 +376,14 @@ func (l FieldTypeList) UnnamedTypeID() TypeID {
 		}
 	}
 	return typeid(s)
+}
+
+func (l FieldTypeList) Types() []Type {
+	res := make([]Type, len(l))
+	for i, ft := range l {
+		res[i] = ft.Type
+	}
+	return res
 }
 
 //----------------------------------------
@@ -435,67 +462,83 @@ type PointerType struct {
 	typeid TypeID
 }
 
-func (pt PointerType) Kind() Kind {
+func (pt *PointerType) Kind() Kind {
 	return PointerKind
 }
 
-func (pt PointerType) TypeID() TypeID {
+func (pt *PointerType) TypeID() TypeID {
 	if pt.typeid.IsZero() {
 		pt.typeid = typeid("*%s", pt.Elt.TypeID().String())
 	}
 	return pt.typeid
 }
 
-func (pt PointerType) String() string {
+func (pt *PointerType) String() string {
 	return fmt.Sprintf("*%s", pt.Elt.String())
 }
 
-func (pt PointerType) Elem() Type {
+func (pt *PointerType) Elem() Type {
 	return pt.Elt
+}
+
+func (pt *PointerType) FindEmbeddedFieldType(n Name) (
+	trail []ValuePath, hasPtr bool, rcvr Type, field Type) {
+
+	switch cet := pt.Elt.(type) {
+	case *DeclaredType, *StructType:
+		// Pointer to declared types and structs
+		// expose embedded methods and fields.
+		// See tests/selector_test.go for examples.
+		trail, hasPtr, rcvr, field = findEmbeddedFieldType(cet, n)
+		if trail != nil { // found
+			hasPtr = true // pt *is* a pointer.
+			switch trail[0].Type {
+			case VPField:
+				trail[0].Type = VPDerefField
+				switch trail[0].Depth {
+				case 0:
+					// *PointerType > *StructType.Field has depth 0.
+				case 1:
+					// *DeclaredType > *StructType.Field has depth 1 (& type VPField).
+					// *PointerType > *DeclaredType > *StructType.Field has depth 2.
+					trail[0].Depth = 2
+					/*
+						// If trail[-1].Type == VPPtrMethod, set VPDerefPtrMethod.
+						if len(trail) > 1 && trail[1].Type == VPPtrMethod {
+							trail[1].Type = VPDerefPtrMethod
+						}
+					*/
+				default:
+					panic("should not happen")
+				}
+				return
+			case VPValMethod:
+				trail[0].Type = VPDerefValMethod
+				return
+			case VPPtrMethod:
+				trail[0].Type = VPDerefPtrMethod
+				return
+			case VPDerefValMethod, VPDerefPtrMethod:
+				panic("should not happen")
+			default:
+				panic("should not happen")
+			}
+		} else { // not found
+			return
+		}
+	default:
+		// nester pointers or pointer to interfaces
+		// and other pointer types do not expose their methods.
+		return
+	}
 }
 
 //----------------------------------------
 // Struct type
 
-// Struct fields are flattened.
-// All non-pointer (embedded and named) inner struct fields get
-// appended (flattened) to the outer struct's fields buffer.
-// Each non-pointer inner-struct's fields are preceded by the
-// type of inner-struct.
-//
-// Mapping contains the original field index to the translated
-// index in Fields. The value is always greater than or equal
-// to the key.
-//
-// Example:
-// type Foo struct {
-//   A int
-//   *Foo
-// }
-// type Bar struct {
-//   B int
-//   X Foo
-//   C int
-// }
-// StructType{Bar}.Fields = []FieldType{
-//   {"B", IntType},
-//   {"X", StructType{Foo}},
-//   {"A", IntType},
-//   {"Foo", PointerType{StructType{Foo}}},
-//   {"C", IntType},
-// }
-// StructType{Bar}.Mapping = []int{0, 1, 4}
-//
-// The type of non-pointer inner struct fields have as their
-// fields slices of the container struct type's field buffer.
-// StructValues are similar in structure.  Mapping
-// contains a mapping from the top-level declared field
-// index to the corresponding entry in the flat buffer
-// Fields.  i.e., len(Mapping) <= len(Fields) and Mapping[x] >= x.
 type StructType struct {
 	PkgPath string
-	Fields  []FieldType // flattened
-	Mapping []int       // map[Orig]:Flat
+	Fields  []FieldType
 
 	typeid TypeID
 }
@@ -527,6 +570,7 @@ func (st *StructType) Elem() Type {
 	panic("struct types have no (universal) elements")
 }
 
+// NOTE only works for exposed non-embedded fields.
 func (st *StructType) GetPathForName(n Name) ValuePath {
 	for i := 0; i < len(st.Fields); i++ {
 		ft := st.Fields[i]
@@ -534,20 +578,7 @@ func (st *StructType) GetPathForName(n Name) ValuePath {
 			if i > 2<<16-1 {
 				panic("too many fields")
 			}
-			return ValuePath{
-				Depth: 1,
-				Index: uint16(i),
-				Name:  n,
-			}
-		} else if ft.Embedded == n {
-			if i > 2<<16-1 {
-				panic("too many fields")
-			}
-			return ValuePath{
-				Depth: 1,
-				Index: uint16(i),
-				Name:  n,
-			}
+			return NewValuePathField(0, uint16(i), n)
 		}
 		if st, ok := ft.Type.(*StructType); ok {
 			if ft.Name != "" {
@@ -562,11 +593,40 @@ func (st *StructType) GetPathForName(n Name) ValuePath {
 
 func (st *StructType) GetStaticTypeOfAt(path ValuePath) Type {
 	if debug {
-		if path.Depth != 1 {
-			panic("expected path.Depth of 1")
+		if path.Depth != 0 {
+			panic("expected path.Depth of 0")
 		}
 	}
 	return st.Fields[path.Index].Type
+}
+
+// Searches embedded fields to find matching method or field,
+// which may be embedded. This function is slow. DeclaredType uses
+// this. There is probably no need to cache positive results here;
+// it may be better to implement it on DeclaredType. The resulting
+// ValuePaths may be modified.  If not found, all returned values
+// are nil; for consistency, check the trail.
+func (st *StructType) FindEmbeddedFieldType(n Name) (
+	trail []ValuePath, hasPtr bool, rcvr Type, field Type) {
+
+	// Search fields.
+	for i := 0; i < len(st.Fields); i++ {
+		sf := &st.Fields[i]
+		// Maybe is a field of the struct.
+		if sf.Name == n {
+			vp := NewValuePathField(0, uint16(i), n)
+			return []ValuePath{vp}, false, nil, sf.Type
+		}
+		// Maybe is embedded within a field.
+		st := sf.Type
+		trail, hasPtr, rcvr, field = findEmbeddedFieldType(st, n)
+		if trail != nil {
+			vp := NewValuePathField(0, uint16(i), sf.Name)
+			return append([]ValuePath{vp}, trail...), hasPtr, rcvr, field
+		}
+	}
+	// Otherwise, it doesn't exist.
+	return nil, false, nil, nil
 }
 
 //----------------------------------------
@@ -610,10 +670,12 @@ func (pt *PackageType) Elem() Type {
 type InterfaceType struct {
 	PkgPath string
 	Methods []FieldType
+	Generic Name // for uverse "generics"
 
 	typeid TypeID
 }
 
+// General empty interface.
 var gEmptyInterfaceType *InterfaceType = &InterfaceType{}
 
 func (it *InterfaceType) IsEmptyInterface() bool {
@@ -625,11 +687,16 @@ func (it *InterfaceType) Kind() Kind {
 }
 
 func (it *InterfaceType) TypeID() TypeID {
+	if debug {
+		if it.Generic != "" {
+			panic("generic type has no TypeID")
+		}
+	}
 	if it.typeid.IsZero() {
 		// NOTE Interface types expressed or declared in different
-		// packages may have the same TypeID if and only if neither
-		// have unexported fields.  pt.Path is only included in field
-		// names that are not uppercase.
+		// packages may have the same TypeID if and only if
+		// neither have unexported fields.  pt.Path is only
+		// included in field names that are not uppercase.
 		ms := FieldTypeList(it.Methods)
 		// XXX pre-sort.
 		sort.Sort(ms)
@@ -639,8 +706,14 @@ func (it *InterfaceType) TypeID() TypeID {
 }
 
 func (it *InterfaceType) String() string {
-	return fmt.Sprintf("interface{%s}",
-		FieldTypeList(it.Methods).String())
+	if it.Generic != "" {
+		return fmt.Sprintf("<%s>{%s}",
+			it.Generic,
+			FieldTypeList(it.Methods).String())
+	} else {
+		return fmt.Sprintf("interface{%s}",
+			FieldTypeList(it.Methods).String())
+	}
 }
 
 func (it *InterfaceType) Elem() Type {
@@ -648,7 +721,9 @@ func (it *InterfaceType) Elem() Type {
 }
 
 // TODO: optimize
+// XXX DEPRECATED -- this is wrong, doesnot work with embedded types.
 func (it *InterfaceType) GetMethodType(n Name) *FuncType {
+	panic("DEPRECATED")
 	for _, im := range it.Methods {
 		if im.Name == n {
 			return im.Type.(*FuncType)
@@ -657,22 +732,76 @@ func (it *InterfaceType) GetMethodType(n Name) *FuncType {
 	return nil
 }
 
+func (it *InterfaceType) FindEmbeddedFieldType(n Name) (
+	trail []ValuePath, hasPtr bool, rcvr Type, ft Type) {
+	for _, im := range it.Methods {
+		if im.Name == n {
+			// a matched name cannot be an embedded interface.
+			if im.Type.Kind() == InterfaceKind {
+				return nil, false, nil, nil
+			}
+			// match found.
+			tr := []ValuePath{NewValuePathInterface(n)}
+			hasPtr := false
+			rcvr := Type(nil)
+			ft := im.Type
+			return tr, hasPtr, rcvr, ft
+		}
+		if et, ok := baseOf(im.Type).(*InterfaceType); ok {
+			// embedded interfaces must be recursively searched.
+			trail, hasPtr, rcvr, ft = et.FindEmbeddedFieldType(n)
+			if trail != nil {
+				if debug {
+					if len(trail) != 1 || trail[0].Type != VPInterface {
+						panic("should not happen")
+					}
+				}
+				return trail, hasPtr, rcvr, ft
+			} // else continue search.
+		} // else continue search.
+	}
+	return nil, false, nil, nil
+}
+
 // For run-time type assertion.
 // TODO: optimize somehow.
-// NOTE: also see *DeclaredType.Implements.
-func (it *InterfaceType) Implements(ot *InterfaceType) bool {
-	for _, om := range ot.Methods {
-		if imt := it.GetMethodType(om.Name); imt != nil {
-			imtid := imt.TypeID()
-			omtid := om.Type.TypeID()
-			if imtid != omtid {
+func (it *InterfaceType) IsImplementedBy(ot Type) bool {
+	gnot := ot
+	if not, ok := ot.(*nativeType); ok {
+		gnot = not.GnoType()
+	}
+	for _, im := range it.Methods {
+		if im.Type.Kind() == InterfaceKind {
+			// field is embedded interface...
+			im2 := baseOf(im.Type).(*InterfaceType)
+			if !im2.IsImplementedBy(ot) {
 				return false
+			} else {
+				continue
 			}
-		} else {
+		}
+		// find method in field.
+		tr, hp, rt, ft := findEmbeddedFieldType(gnot, im.Name)
+		if tr == nil { // not found.
+			return false
+		}
+		// if method is pointer receiver, check addressability:
+		if _, ptrRcvr := rt.(*PointerType); ptrRcvr && !hp {
+			return false // not addressable.
+		}
+		// check for func type equality.
+		mt := ft.(*FuncType)
+		dmtid := mt.TypeID()
+		imtid := im.Type.TypeID()
+		if dmtid != imtid {
 			return false
 		}
 	}
 	return true
+}
+
+func (it *InterfaceType) GetPathForName(n Name) ValuePath {
+	return NewValuePathInterface(n)
 }
 
 //----------------------------------------
@@ -690,11 +819,32 @@ func (ct *ChanType) Kind() Kind {
 }
 
 func (ct *ChanType) TypeID() TypeID {
-	panic("not yet implemented")
+	if ct.typeid.IsZero() {
+		switch ct.Dir {
+		case SEND | RECV:
+			ct.typeid = typeid("chan{%s}" + ct.Elt.TypeID().String())
+		case SEND:
+			ct.typeid = typeid("<-chan{%s}" + ct.Elt.TypeID().String())
+		case RECV:
+			ct.typeid = typeid("chan<-{%s}" + ct.Elt.TypeID().String())
+		default:
+			panic("should not happen")
+		}
+	}
+	return ct.typeid
 }
 
 func (ct *ChanType) String() string {
-	panic("not yet implemented")
+	switch ct.Dir {
+	case SEND | RECV:
+		return "chan " + ct.Elt.String()
+	case SEND:
+		return "<-chan " + ct.Elt.String()
+	case RECV:
+		return "chan<- " + ct.Elt.String()
+	default:
+		panic("should not happen")
+	}
 }
 
 func (ct *ChanType) Elem() Type {
@@ -711,6 +861,18 @@ type FuncType struct {
 
 	typeid TypeID
 	bound  *FuncType
+}
+
+// if ft is a method, returns whether method takes a pointer receiver.
+func (ft *FuncType) HasPointerReceiver() bool {
+	if debug {
+		if len(ft.Params) == 0 {
+			panic("expected unbound method function type, but found no receiver parameter.")
+		}
+	}
+	_, ok := ft.Params[0].Type.(*PointerType)
+	return ok
+	// return ft.Params[0].Type.Kind() == PointerKind
 }
 
 func (ft *FuncType) Kind() Kind {
@@ -738,20 +900,122 @@ func (ft *FuncType) UnboundType(rft FieldType) *FuncType {
 	}
 }
 
+// given the call arg types (and whether is ...varg), specify any
+// generic types to return the ultimate specified func type.
+// Any untyped arg types are first converted to its default type.
+// NOTE: if ft.HasVarg() and !isVarg, argTVs[len(ft.Params):]
+// are ignored (since they are of the same type as
+// argTVs[len(ft.Params)-1]).
+func (ft *FuncType) Specify(argTVs []TypedValue, isVarg bool) *FuncType {
+	hasGenericParams := false
+	hasGenericResults := false
+	for _, pf := range ft.Params {
+		if isGeneric(pf.Type) {
+			hasGenericParams = true
+			break
+		}
+	}
+	for _, rf := range ft.Results {
+		if isGeneric(rf.Type) {
+			hasGenericResults = true
+			break
+		}
+	}
+	if !hasGenericParams && hasGenericResults {
+		panic("function with generic results require matching generic params")
+	}
+	if !hasGenericParams && !hasGenericResults {
+		return ft // no changes.
+	}
+	lookup := map[Name]Type{}
+	hasVarg := ft.HasVarg()
+	if hasVarg && !isVarg {
+		if isGeneric(ft.Params[len(ft.Params)-1].Type) {
+			// consolidate vargs into slice.
+			var nvarg int
+			var vargt Type
+			for i := len(ft.Params) - 1; i < len(argTVs); i++ {
+				nvarg++
+				varg := argTVs[i]
+				if varg.T == nil {
+					continue
+				} else if vargt == nil {
+					vargt = varg.T
+				} else if vargt.TypeID() != varg.T.TypeID() {
+					panic(fmt.Sprintf(
+						"uncompatible varg types: expected %v, got %s",
+						vargt.String(),
+						varg.T.String()))
+				}
+			}
+			if nvarg > 0 && vargt == nil {
+				panic(fmt.Sprintf(
+					"unspecified generic varg %s",
+					ft.Params[len(ft.Params)-1].String()))
+			}
+			argTVs = argTVs[:len(ft.Params)-1]
+			argTVs = append(argTVs, TypedValue{
+				T: &SliceType{Elt: vargt, Vrd: true},
+				V: nil,
+			})
+		} else {
+			// just use already specific type.
+			argTVs = argTVs[:len(ft.Params)-1]
+			argTVs = append(argTVs, TypedValue{
+				T: ft.Params[len(ft.Params)-1].Type,
+				V: nil,
+			})
+		}
+	}
+	// specify generic types from args.
+	for i, pf := range ft.Params {
+		arg := &argTVs[i]
+		if arg.T.Kind() == TypeKind {
+			specifyType(lookup, pf.Type, arg.T, arg.GetType())
+		} else {
+			specifyType(lookup, pf.Type, arg.T, nil)
+		}
+	}
+	// apply specifics to generic params and results.
+	pfts := make([]FieldType, len(ft.Params))
+	rfts := make([]FieldType, len(ft.Results))
+	for i, pft := range ft.Params {
+		pt, _ := applySpecifics(lookup, pft.Type)
+		pfts[i] = FieldType{
+			Name: pft.Name,
+			Type: pt,
+		}
+	}
+	for i, rft := range ft.Results {
+		rt, _ := applySpecifics(lookup, rft.Type)
+		rfts[i] = FieldType{
+			Name: rft.Name,
+			Type: rt,
+		}
+	}
+	return &FuncType{
+		PkgPath: ft.PkgPath,
+		Params:  pfts,
+		Results: rfts,
+	}
+}
+
 func (ft *FuncType) TypeID() TypeID {
 	// Two functions of different realms can have the same
 	// type, because the method signature doesn't change, and
 	// this exchangeability is useful to denote type semantics.
 	ps := FieldTypeList(ft.Params)
 	rs := FieldTypeList(ft.Results)
-	pp := ""
-	if ps.HasUnexported() || rs.HasUnexported() {
-		pp = fmt.Sprintf("@%q", ft.PkgPath)
-	}
+	/*
+		pp := ""
+		if ps.HasUnexported() || rs.HasUnexported() {
+			pp = fmt.Sprintf("@%q", ft.PkgPath)
+		}
+	*/
 	if ft.typeid.IsZero() {
 		ft.typeid = typeid(
-			"f%s(%s)(%s)",
-			pp,
+			"func(%s)(%s)",
+			//pp,
 			ps.UnnamedTypeID(),
 			rs.UnnamedTypeID(),
 		)
@@ -760,7 +1024,7 @@ func (ft *FuncType) TypeID() TypeID {
 }
 
 func (ft *FuncType) String() string {
-	return fmt.Sprintf("func@%s(%s)(%s)",
+	return fmt.Sprintf("%s.func(%s)(%s)",
 		ft.PkgPath,
 		FieldTypeList(ft.Params).StringWithCommas(),
 		FieldTypeList(ft.Results).StringWithCommas())
@@ -855,20 +1119,23 @@ type DeclaredType struct {
 	Methods []TypedValue // {T:*FuncType,V:*FuncValue}...
 
 	typeid TypeID
+	sealed bool
 }
 
-var x = 0
-
+// returns an unsealed *DeclaredType.
+// do not use for aliases.
 func declareWith(pkgPath string, name Name, b Type) *DeclaredType {
 	dt := &DeclaredType{
 		PkgPath: pkgPath,
 		Name:    name,
 		Base:    baseOf(b),
-	}
-	x++
-	if x == 3 {
+		sealed:  false,
 	}
 	return dt
+}
+
+func BaseOf(t Type) Type {
+	return baseOf(t)
 }
 
 func baseOf(t Type) Type {
@@ -884,10 +1151,29 @@ func (dt *DeclaredType) Kind() Kind {
 	return dt.Base.Kind()
 }
 
+func (dt *DeclaredType) Seal() {
+	if dt.sealed {
+		panic(fmt.Sprintf(
+			"*DeclaredType %s already sealed",
+			dt.Name))
+	}
+	dt.sealed = true
+}
+
+// NOTE: it is difficult to do otherwise than to hash the package name and
+// type name, because types may be recursive in complex ways.  This appears
+// related to the graph homomorphism problem.  So, beware.  For now, we
+// require the user to verify the definition of declared types in a
+// separate request or piece of data.
 func (dt *DeclaredType) TypeID() TypeID {
+	if !dt.sealed {
+		panic(fmt.Sprintf(
+			"*DeclaredType %s not yet sealed",
+			dt.Name))
+	}
 	if dt.typeid.IsZero() {
-		dt.typeid = typeid("%s.%s=%s",
-			dt.PkgPath, dt.Name, dt.Base.TypeID().String())
+		dt.typeid = typeid("%s.%s",
+			dt.PkgPath, dt.Name)
 	}
 	return dt.typeid
 }
@@ -900,6 +1186,13 @@ func (dt *DeclaredType) Elem() Type {
 	return dt.Base.Elem()
 }
 
+func (dt *DeclaredType) DefineMethod(fv *FuncValue) {
+	dt.Methods = append(dt.Methods, TypedValue{
+		T: fv.Type,
+		V: fv,
+	})
+}
+
 func (dt *DeclaredType) GetPathForName(n Name) ValuePath {
 	// May be a method.
 	for i, tv := range dt.Methods {
@@ -908,10 +1201,10 @@ func (dt *DeclaredType) GetPathForName(n Name) ValuePath {
 			if i > 2<<16-1 {
 				panic("too many methods")
 			}
-			return ValuePath{
-				Depth: 1,
-				Index: uint16(i),
-				Name:  n,
+			if fv.Type.HasPointerReceiver() {
+				return NewValuePathPtrMethod(uint16(i), n)
+			} else {
+				return NewValuePathValMethod(uint16(i), n)
 			}
 		}
 	}
@@ -921,63 +1214,122 @@ func (dt *DeclaredType) GetPathForName(n Name) ValuePath {
 	return path
 }
 
-func (dt *DeclaredType) GetValueRefAt(path ValuePath) *TypedValue {
-	if path.Depth == 0 {
-		panic("*DeclaredType global fields not yet implemented")
-	} else if path.Depth == 1 {
-		return &dt.Methods[path.Index]
-	} else {
-		panic("DeclaredType.GetValueRefAt() expects generation <= 1")
-	}
-}
-
-func (dt *DeclaredType) DefineMethod(fv *FuncValue) {
-	dt.Methods = append(dt.Methods, TypedValue{
-		T: fv.Type,
-		V: fv,
-	})
-}
-
-// Returns any methods defined for this declared type.
-// TODO call this from op_eval:*CallExpr to prevent
-// heap allocation upon getting bound method.
-func (dt *DeclaredType) GetMethodAt(path ValuePath) *FuncValue {
-	if debug {
-		if path.Depth == 0 {
-			panic("DeclaredType global method/field not yet implemented")
-		} else if path.Depth > 1 {
-			panic("DeclaredType expects generation 1")
+func (dt *DeclaredType) GetUnboundPathForName(n Name) ValuePath {
+	for i, tv := range dt.Methods {
+		fv := tv.V.(*FuncValue)
+		if fv.Name == n {
+			if i > 2<<16-1 {
+				panic("too many methods")
+			}
+			return NewValuePathField(0, uint16(i), n)
 		}
 	}
-	return dt.Methods[path.Index].V.(*FuncValue)
+	panic(fmt.Sprintf(
+		"unknown *DeclaredType method named %s",
+		n))
 }
 
-// TODO: optimize
+// Returns the method declared onto dt.
+// For embedded field methods, use FindEmbeddedFieldType().
 func (dt *DeclaredType) GetMethod(n Name) *FuncValue {
-	for _, mtv := range dt.Methods {
-		if fv := mtv.V.(*FuncValue); fv.Name == n {
+	for i := 0; i < len(dt.Methods); i++ {
+		mv := &dt.Methods[i]
+		if fv := mv.GetFunc(); fv.Name == n {
 			return fv
 		}
 	}
 	return nil
 }
 
-// For run-time type assertion.
-// TODO: optimize somehow.
-// NOTE: also see *InterfaceType.Implements.
-func (dt *DeclaredType) Implements(ot *InterfaceType) bool {
-	for _, om := range ot.Methods {
-		if dm := dt.GetMethod(om.Name); dm != nil {
-			dmtid := dm.Type.TypeID()
-			omtid := om.Type.TypeID()
-			if dmtid != omtid {
-				return false
+// Searches embedded fields to find matching field or method.
+// This function is slow.
+// TODO: consider memoizing for successful matches.
+func (dt *DeclaredType) FindEmbeddedFieldType(n Name) (
+	trail []ValuePath, hasPtr bool, rcvr Type, ft Type) {
+
+	// Search direct methods.
+	for i := 0; i < len(dt.Methods); i++ {
+		mv := &dt.Methods[i]
+		if fv := mv.GetFunc(); fv.Name == n {
+			rt := fv.Type.Params[0].Type
+			vp := ValuePath{}
+			if _, ok := rt.(*PointerType); ok {
+				vp = NewValuePathPtrMethod(uint16(i), n)
+			} else {
+				vp = NewValuePathValMethod(uint16(i), n)
 			}
-		} else {
-			return false
+			bt := fv.Type.BoundType()
+			return []ValuePath{vp}, false, rt, bt
 		}
 	}
-	return true
+	// Otherwise, search base.
+	trail, hasPtr, rcvr, ft = findEmbeddedFieldType(dt.Base, n)
+	if trail == nil {
+		return nil, false, nil, nil
+	}
+	switch trail[0].Type {
+	case VPInterface:
+		return trail, hasPtr, rcvr, ft
+	case VPField, VPDerefField:
+		if debug {
+			if trail[0].Depth != 0 && trail[0].Depth != 2 {
+				panic("should not happen")
+			}
+		}
+		trail[0].Depth += 1
+		return trail, hasPtr, rcvr, ft
+	default:
+		panic("should not happen")
+	}
+}
+
+// The Preprocesses uses *DT.GetPathForName(name) to set the path, and also
+// *DT.GetMethod(name) to consult the type.  OpSelector uses
+// *TV.GetPointerTo(path), and for declared types, in turn uses
+// *DT.GetValueRefAt(path) to find any methods (see values.go).
+//
+// If the method is embedded (as a method of an embedded struct, or the
+// method of an embedded interface), then the current implementation in
+// preprocessor doesn't work, as it uses *DT.GetMethod(name), which uses
+// *DT.GetValueRef(name).
+//
+// i.e.,
+//  preprocessor: *DT.GetPathForName(name)
+//                *DT.GetMethod(name)
+//                 -> *DT.GetValueRef(name)
+//                *DT.GetValueRefAt(path) // from op_type/evalTypeOf()
+//
+//       runtime: *TV.GetPointerTo(path)
+//                 -> *DT.GetValueRefAt(path)
+//                     -> *DT.GetValueRef(name) // if interface
+//                     -> *DT.FindEmbeddedFieldType(name) // proposed
+// TODO: update above to visualize flow chart.
+//
+// NOTE: The preprocessor expands (elided) embedded field selectors.
+// NOTE: only works for local methods.
+func (dt *DeclaredType) GetValueRefAt(path ValuePath) *TypedValue {
+	switch path.Type {
+	case VPInterface:
+		panic("should not happen")
+		// should call *DT.FindEmbeddedFieldType(name) instead.
+		// tr, hp, rt, ft := dt.FindEmbeddedFieldType(n)
+	case VPValMethod, VPPtrMethod:
+		if path.Depth == 0 {
+			return &dt.Methods[path.Index]
+		} else {
+			panic("DeclaredType.GetValueRefAt() expects depth == 0")
+		}
+	case VPField:
+		if path.Depth == 0 {
+			return &dt.Methods[path.Index]
+		} else {
+			panic("DeclaredType.GetValueRefAt() expects depth == 0")
+		}
+	default:
+		panic(fmt.Sprintf(
+			"unexpected value path type %s",
+			path.String()))
+	}
 }
 
 //----------------------------------------
@@ -1052,14 +1404,84 @@ func (nt *nativeType) String() string {
 }
 
 func (nt *nativeType) Elem() Type {
-	return nt.GnoType().Elem()
+	return nt.GnoType().Elem() // XXX why .GnoType().Elem()? what uses this?
 }
 
 func (nt *nativeType) GnoType() Type {
 	if nt.gnoType == nil {
-		nt.gnoType = go2GnoType2(nt.Type, false)
+		nt.gnoType = go2GnoType2(nt.Type)
 	}
 	return nt.gnoType
+}
+
+func (nt *nativeType) FindEmbeddedFieldType(n Name) (
+	trail []ValuePath, hasPtr bool, rcvr Type, field Type) {
+
+	// switch on type and maybe match field.
+	var rt reflect.Type = nt.Type
+	if rt.Kind() == reflect.Ptr {
+		// match on pointer to field
+		ert := rt.Elem()
+		rft, ok := ert.FieldByName(string(n))
+		if ok {
+			trail = []ValuePath{NewValuePathNative(n)}
+			hasPtr = true
+			rcvr = nil
+			field = go2GnoType(rft.Type)
+			return
+		} else {
+			// deref and continue...
+			hasPtr = true
+		}
+	} else if rt.Kind() == reflect.Struct {
+		// match on field.
+		rft, ok := rt.FieldByName(string(n))
+		if ok {
+			trail = []ValuePath{NewValuePathNative(n)}
+			hasPtr = false
+			rcvr = nil
+			field = go2GnoType(rft.Type)
+			return
+		} else { // no match
+			return nil, false, nil, nil
+		}
+	} else if rt.Kind() == reflect.Interface {
+		// match on interface.
+		rmt, ok := rt.MethodByName(string(n))
+		if ok {
+			trail = []ValuePath{NewValuePathNative(n)}
+			rcvr = nil
+			field = go2GnoType(rmt.Type)
+			return
+		} else { // no match
+			return nil, false, nil, nil
+		}
+	}
+	// match method on non-interface type.
+	rmt, ok := rt.MethodByName(string(n))
+	if ok {
+		trail = []ValuePath{NewValuePathNative(n)}
+		if rmt.Type.In(0).Kind() == reflect.Ptr {
+			if debug {
+				if !hasPtr {
+					panic("should not happen")
+				}
+			}
+			rcvr = nt
+		} else {
+			if hasPtr {
+				rcvr = &nativeType{
+					Type: nt.Type.Elem(),
+				} // XXX inefficient new/alloc.
+			} else {
+				rcvr = nt
+			}
+		}
+		field = nil // XXX not set for native non-interface methods, too cumbersome/slow.
+		return
+	} else { // no match
+		return nil, false, nil, nil
+	}
 }
 
 //----------------------------------------
@@ -1081,6 +1503,87 @@ func (bt blockType) String() string {
 
 func (bt blockType) Elem() Type {
 	panic("blockType has no elem type")
+}
+
+//----------------------------------------
+// tupleType
+
+type tupleType struct {
+	Elts []Type
+
+	typeid TypeID
+}
+
+func (tt *tupleType) Kind() Kind {
+	return TupleKind
+}
+
+func (tt *tupleType) TypeID() TypeID {
+	if tt.typeid.IsZero() {
+		ell := len(tt.Elts)
+		s := "("
+		for i, et := range tt.Elts {
+			s += et.TypeID().String()
+			if i != ell-1 {
+				s += ","
+			}
+		}
+		s += ")"
+		tt.typeid = typeid(s)
+	}
+	return tt.typeid
+}
+
+func (tt *tupleType) String() string {
+	ell := len(tt.Elts)
+	s := "("
+	for i, et := range tt.Elts {
+		s += et.String()
+		if i != ell-1 {
+			s += ","
+		}
+	}
+	s += ")"
+	return s
+}
+
+func (tt *tupleType) Elem() Type {
+	panic("tupleType has no singular elem type")
+}
+
+//----------------------------------------
+// Float32 and Float64
+
+var Float32Type *StructType
+var Float64Type *StructType
+
+// NOTE: this path is used to identify the struct type as a Float64.
+const float32PkgPath = uversePkgPath + "#float32"
+const float64PkgPath = uversePkgPath + "#float64"
+
+func init() {
+	Float32Type = &StructType{
+		PkgPath: float32PkgPath,
+		Fields: []FieldType{
+			FieldType{
+				Name:     "Value",
+				Type:     Uint32Type,
+				Embedded: false,
+				Tag:      "",
+			},
+		},
+	}
+	Float64Type = &StructType{
+		PkgPath: float64PkgPath,
+		Fields: []FieldType{
+			FieldType{
+				Name:     "Value",
+				Type:     Uint64Type,
+				Embedded: false,
+				Tag:      "",
+			},
+		},
+	}
 }
 
 //----------------------------------------
@@ -1116,6 +1619,7 @@ const (
 	TypeKind // not in go.
 	// UnsafePointerKind
 	BlockKind // not in go.
+	TupleKind // not in go.
 )
 
 // This is generally slower than switching on baseOf(t).
@@ -1162,7 +1666,7 @@ func KindOf(t Type) Kind {
 		return ArrayKind
 	case *SliceType:
 		return SliceKind
-	case PointerType:
+	case *PointerType:
 		return PointerKind
 	case *StructType:
 		return StructKind
@@ -1182,8 +1686,61 @@ func KindOf(t Type) Kind {
 		return t.Kind()
 	case blockType:
 		return BlockKind
+	case *tupleType:
+		return TupleKind
 	default:
 		panic(fmt.Sprintf("unexpected type %#v", t))
+	}
+}
+
+//----------------------------------------
+// main type-assertion functions.
+
+// TODO: document what class of problems its for.
+// One of them can be nil, and this lets uninitialized primitives
+// and others serve as empty values.  See doOpAdd()
+func assertSameTypes(lt, rt Type) {
+	if lt == nil && rt == nil {
+		// both are nil.
+	} else if lt == nil || rt == nil {
+		// one is nil.  see function comment.
+	} else if lt.Kind() == rt.Kind() &&
+		isUntyped(lt) || isUntyped(rt) {
+		// one is untyped of same kind.
+	} else if lt.TypeID() == rt.TypeID() {
+		// non-nil types are identical.
+	} else {
+		panic(fmt.Sprintf(
+			"incompatible operands in binary expression: %s and %s",
+			lt.String(),
+			rt.String(),
+		))
+	}
+}
+
+// Like assertSameTypes(), but more relaxed, for == and !=.
+func assertEqualityTypes(lt, rt Type) {
+	if lt == nil && rt == nil {
+		// both are nil.
+	} else if lt == nil || rt == nil {
+		// one is nil.  see function comment.
+	} else if lt.Kind() == rt.Kind() &&
+		isUntyped(lt) || isUntyped(rt) {
+		// one is untyped of same kind.
+	} else if lt.Kind() == InterfaceKind &&
+		IsImplementedBy(lt, rt) {
+		// rt implements lt (and lt is nil interface).
+	} else if rt.Kind() == InterfaceKind &&
+		IsImplementedBy(rt, lt) {
+		// lt implements rt (and rt is nil interface).
+	} else if lt.TypeID() == rt.TypeID() {
+		// non-nil types are identical.
+	} else {
+		panic(fmt.Sprintf(
+			"incompatible operands in binary (eql/neq) expression: %s and %s",
+			lt.String(),
+			rt.String(),
+		))
 	}
 }
 
@@ -1199,7 +1756,8 @@ func isUntyped(t Type) bool {
 	}
 }
 
-// TODO move untyped const stuff to preprocess.go
+// TODO move untyped const stuff to preprocess.go.
+// TODO associate with ConvertTo() in documentation.
 func defaultTypeOf(t Type) Type {
 	switch t {
 	case UntypedBoolType:
@@ -1224,48 +1782,46 @@ func fillEmbeddedName(ft *FieldType) {
 		return
 	}
 	switch ct := ft.Type.(type) {
-	case PointerType:
+	case *PointerType:
 		// dereference one level
 		switch ct := ct.Elt.(type) {
 		case *DeclaredType:
-			ft.Embedded = ct.Name
-			return
+			ft.Name = ct.Name
 		case *nativeType:
 			panic("native type cannot be embedded")
 		default:
 			panic("should not happen")
 		}
 	case *DeclaredType:
-		ft.Embedded = ct.Name
-		return
+		ft.Name = ct.Name
 	case PrimitiveType:
 		switch ct {
 		case BoolType:
-			ft.Embedded = Name("bool")
+			ft.Name = Name("bool")
 		case StringType:
-			ft.Embedded = Name("string")
+			ft.Name = Name("string")
 		case IntType:
-			ft.Embedded = Name("int")
+			ft.Name = Name("int")
 		case Int8Type:
-			ft.Embedded = Name("int8")
+			ft.Name = Name("int8")
 		case Int16Type:
-			ft.Embedded = Name("int16")
+			ft.Name = Name("int16")
 		case Int32Type:
-			ft.Embedded = Name("int32")
+			ft.Name = Name("int32")
 		case Int64Type:
-			ft.Embedded = Name("int64")
+			ft.Name = Name("int64")
 		case UintType:
-			ft.Embedded = Name("uint")
+			ft.Name = Name("uint")
 		case Uint8Type:
-			ft.Embedded = Name("uint8")
+			ft.Name = Name("uint8")
 		case Uint16Type:
-			ft.Embedded = Name("uint16")
+			ft.Name = Name("uint16")
 		case Uint32Type:
-			ft.Embedded = Name("uint32")
+			ft.Name = Name("uint32")
 		case Uint64Type:
-			ft.Embedded = Name("uint64")
+			ft.Name = Name("uint64")
 		case BigintType:
-			ft.Embedded = Name("bigint")
+			ft.Name = Name("bigint")
 		default:
 			panic("should not happen")
 		}
@@ -1275,5 +1831,259 @@ func fillEmbeddedName(ft *FieldType) {
 		panic(fmt.Sprintf(
 			"unexpected field type %s",
 			ft.Type.String()))
+	}
+	ft.Embedded = true
+}
+
+func IsImplementedBy(it Type, ot Type) bool {
+	return baseOf(it).(*InterfaceType).IsImplementedBy(ot)
+}
+
+// given a map of generic type names, match the tmpl type which
+// might include generics with the spec type which is concrete
+// with no generics, and update the lookup map or panic if error.
+// specTypeval is Type if spec is TypeKind.
+func specifyType(lookup map[Name]Type, tmpl Type, spec Type, specTypeval Type) {
+	if isGeneric(spec) {
+		panic("spec must not be generic")
+	}
+	switch ct := tmpl.(type) {
+	case *PointerType:
+		switch pt := baseOf(spec).(type) {
+		case *PointerType:
+			specifyType(lookup, ct.Elt, pt.Elt, nil)
+		case *nativeType:
+			et := &nativeType{Type: pt.Type.Elem()}
+			specifyType(lookup, ct.Elt, et, nil)
+		default:
+			panic(fmt.Sprintf(
+				"expected pointer kind but got %s",
+				spec.Kind()))
+		}
+	case *ArrayType:
+		switch at := baseOf(spec).(type) {
+		case *ArrayType:
+			specifyType(lookup, ct.Elt, at.Elt, nil)
+		case *nativeType:
+			et := &nativeType{Type: at.Type.Elem()}
+			specifyType(lookup, ct.Elt, et, nil)
+		default:
+			panic(fmt.Sprintf(
+				"expected array kind but got %s",
+				spec.Kind()))
+		}
+	case *SliceType:
+		switch st := baseOf(spec).(type) {
+		case PrimitiveType:
+			if isGeneric(ct.Elt) {
+				if st.Kind() == StringKind {
+					specifyType(lookup, ct.Elt, Uint8Type, nil)
+				} else {
+					panic(fmt.Sprintf(
+						"expected slice kind but got %s",
+						spec.Kind()))
+				}
+			} else if ct.Elt != Uint8Type {
+				panic(fmt.Sprintf(
+					"expected slice kind but got %s",
+					spec.Kind()))
+			} else if st != StringType {
+				panic(fmt.Sprintf(
+					"expected slice kind (or string type) but got %s",
+					spec.Kind()))
+			}
+		case *SliceType:
+			specifyType(lookup, ct.Elt, st.Elt, nil)
+		case *nativeType:
+			et := &nativeType{Type: st.Type.Elem()}
+			specifyType(lookup, ct.Elt, et, nil)
+		default:
+			panic(fmt.Sprintf(
+				"expected slice kind but got %s",
+				spec.Kind()))
+		}
+	case *MapType:
+		switch mt := baseOf(spec).(type) {
+		case *MapType:
+			specifyType(lookup, ct.Key, mt.Key, nil)
+			specifyType(lookup, ct.Value, mt.Value, nil)
+		case *nativeType:
+			kt := &nativeType{Type: mt.Type.Key()}
+			vt := &nativeType{Type: mt.Type.Elem()}
+			specifyType(lookup, ct.Key, kt, nil)
+			specifyType(lookup, ct.Value, vt, nil)
+		default:
+			panic(fmt.Sprintf(
+				"expected map kind but got %s",
+				spec.Kind()))
+		}
+	case *InterfaceType:
+		if ct.Generic != "" {
+			// tmpl is generic, so replace from lookup.
+			if strings.HasSuffix(string(ct.Generic), ".(type)") {
+				if spec.Kind() != TypeKind {
+					panic(fmt.Sprintf(
+						"generic <%s> requires type kind, got %v",
+						ct.Generic,
+						spec.Kind()))
+				}
+				generic := ct.Generic[:len(ct.Generic)-len(".(type)")]
+				match, ok := lookup[generic]
+				if ok {
+					if match.TypeID() != specTypeval.TypeID() {
+						panic(fmt.Sprintf(
+							"expected %s for <%s> but got %s",
+							match.String(),
+							ct.Generic,
+							specTypeval.String()))
+					} else {
+						return // ok
+					}
+				} else {
+					lookup[generic] = specTypeval
+					return // ok
+				}
+			} else {
+				match, ok := lookup[ct.Generic]
+				if ok {
+					checkType(spec, match)
+					return // ok
+					/*
+						if match.TypeID() != spec.TypeID() {
+							panic(fmt.Sprintf(
+								"expected %s for <%s> but got %s",
+								match.String(),
+								ct.Generic,
+								spec.String()))
+						} else {
+							return // ok
+						}
+					*/
+				} else {
+					if isUntyped(spec) {
+						spec = defaultTypeOf(spec)
+					}
+					lookup[ct.Generic] = spec
+					return // ok
+				}
+			}
+		} else {
+			// TODO: handle generics in method signatures
+			return // nothing to do
+		}
+	default:
+		// ignore, no generics.
+	}
+}
+
+// given the lookup map accumulated w/ specifyType(), apply the
+// lookup map to derive the specific (composite) type from a
+// generic template.  if the input tmpl has no generics, it is
+// simply returned.  if a generic is not yet specified, panics.
+func applySpecifics(lookup map[Name]Type, tmpl Type) (Type, bool) {
+	switch ct := tmpl.(type) {
+	case *PointerType:
+		pte, ok := applySpecifics(lookup, ct.Elt)
+		if !ok { // simply return
+			return tmpl, false
+		}
+		return &PointerType{
+			Elt: pte,
+		}, true
+	case *ArrayType:
+		ate, ok := applySpecifics(lookup, ct.Elt)
+		if !ok { // simply return
+			return tmpl, false
+		}
+		return &ArrayType{
+			Len: ct.Len,
+			Elt: ate,
+			Vrd: ct.Vrd,
+		}, true
+	case *SliceType:
+		ste, ok := applySpecifics(lookup, ct.Elt)
+		if !ok { // simply return
+			return tmpl, false
+		}
+		return &SliceType{
+			Elt: ste,
+			Vrd: ct.Vrd,
+		}, true
+	case *MapType:
+		mtk, okk := applySpecifics(lookup, ct.Key)
+		mtv, okv := applySpecifics(lookup, ct.Value)
+		if !okk && !okv { // simply return
+			return tmpl, false
+		}
+		return &MapType{
+			Key:   mtk,
+			Value: mtv,
+		}, true
+	case *InterfaceType:
+		if ct.Generic != "" {
+			if strings.HasSuffix(string(ct.Generic), ".(type)") {
+				return gTypeType, true
+			} else {
+				match, ok := lookup[ct.Generic]
+				if ok {
+					return match, true
+				} else {
+					panic(fmt.Sprintf(
+						"unspecified generic type <%s>",
+						ct.Generic))
+				}
+			}
+		} else { // simply return
+			// TODO: handle generics in method signatures
+			return tmpl, false
+		}
+	default:
+		// ignore, no generics.
+		return tmpl, false
+	}
+}
+
+// returns true if t is generic or has generic component.
+func isGeneric(t Type) bool {
+	switch ct := t.(type) {
+	case FieldType:
+		return isGeneric(ct.Type)
+	case *PointerType:
+		return isGeneric(ct.Elt)
+	case *ArrayType:
+		return isGeneric(ct.Elt)
+	case *SliceType:
+		return isGeneric(ct.Elt)
+	case *MapType:
+		return isGeneric(ct.Key) ||
+			isGeneric(ct.Value)
+	case *InterfaceType:
+		// TODO: handle generics in method signatures
+		return ct.Generic != ""
+	default:
+		return false
+	}
+}
+
+// NOTE: runs at preprocess time but also runtime,
+// for dynamic interface lookups.
+// TODO: could this be more optimized for the runtime?
+// are Go-style itables the solution or?
+func findEmbeddedFieldType(t Type, n Name) (
+	trail []ValuePath, hasPtr bool, rcvr Type, ft Type) {
+
+	switch ct := t.(type) {
+	case *DeclaredType:
+		return ct.FindEmbeddedFieldType(n)
+	case *PointerType:
+		return ct.FindEmbeddedFieldType(n)
+	case *StructType:
+		return ct.FindEmbeddedFieldType(n)
+	case *InterfaceType:
+		return ct.FindEmbeddedFieldType(n)
+	case *nativeType:
+		return ct.FindEmbeddedFieldType(n)
+	default:
+		return nil, false, nil, nil
 	}
 }

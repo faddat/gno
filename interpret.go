@@ -135,16 +135,18 @@ func (m *Machine) RunFiles(fns ...*FileNode) {
 		pv.AddFileBlock(fn.Name, fb)
 		updates := pn.UpdatePackage(pv) // with fb.
 		// Run declarations.
-		for _, d := range fn.Body {
-			m.runDeclaration(d)
+		for _, decl := range fn.Decls {
+			m.runDeclaration(decl)
 		}
 		// Run new init functions.
 		for i := 0; i < len(updates); i++ {
 			tv := &updates[i]
-			if tv.IsDefined() && tv.T.Kind() == FuncKind {
-				fn := tv.V.(*FuncValue).Name
-				if strings.HasPrefix(string(fn), "init.") {
-					m.RunFunc(fn)
+			if tv.IsDefined() && tv.T.Kind() == FuncKind && tv.V != nil {
+				if fv, ok := tv.V.(*FuncValue); ok {
+					fn := fv.Name
+					if strings.HasPrefix(string(fn), "init.") {
+						m.RunFunc(fn)
+					}
 				}
 			}
 		}
@@ -199,7 +201,7 @@ func (m *Machine) Eval(x Expr) TypedValue {
 	// context (ie **PackageNode) doesn't get modified.
 	if _, ok := x.(*CallExpr); !ok {
 		x = Call(Fn(nil, Flds("x", InterfaceT(nil)),
-			Body(
+			Ss(
 				Return(x),
 			)))
 	} else {
@@ -315,7 +317,6 @@ func (m *Machine) runDeclaration(d Decl) {
 		// closure and package already set
 		// during PackageNode.NewPackage().
 	case *ValueDecl:
-		// TODO make use of .Const.
 		// XXX Use async w/ ops.
 		var tv TypedValue
 		var t Type
@@ -336,7 +337,17 @@ func (m *Machine) runDeclaration(d Decl) {
 			m.Run()
 			tv = *m.PopValue()
 			if isUntyped(tv.T) {
-				ConvertUntypedTo(&tv, t)
+				if d.Const {
+					// const x t? = y;
+					// if t isn't nil, convert.
+					if t != nil {
+						ConvertUntypedTo(&tv, t)
+					}
+				} else {
+					// var x t? = y;
+					// whether t is nil or nit, convert.
+					ConvertUntypedTo(&tv, t)
+				}
 			} else if t != nil {
 				if t.Kind() == InterfaceKind {
 					// keep tv as is.
@@ -368,7 +379,7 @@ func (m *Machine) runDeclaration(d Decl) {
 			tv.V = defaultValue(t)
 		}
 		ptr := last.GetPointerTo(d.Path)
-		ptr.Assign2(m.Realm, tv)
+		ptr.Assign2(m.Realm, tv, false)
 	case *TypeDecl:
 		var t Type
 		if false {
@@ -405,7 +416,7 @@ func (m *Machine) runDeclaration(d Decl) {
 		}
 		tv := asValue(t)
 		ptr := last.GetPointerTo(d.Path)
-		ptr.Assign2(m.Realm, tv)
+		ptr.Assign2(m.Realm, tv, false)
 	default:
 		// Do nothing for package constants.
 	}
@@ -419,33 +430,33 @@ type Op uint8
 const (
 
 	/* Control operators */
-	OpInvalid         Op = 0x00 // invalid
-	OpHalt            Op = 0x01 // halt (e.g. last statement)
-	OpNoop            Op = 0x02 // no-op
-	OpExec            Op = 0x03 // exec next statement
-	OpPrecall         Op = 0x04 // sets X (func) to frame
-	OpCall            Op = 0x05 // call(Frame.Func, [...])
-	OpCallNativeBody  Op = 0x06 // call body is native
-	OpReturn          Op = 0x07 // return ...
-	OpReturnFromBlock Op = 0x08 // return results (after defers)
-	OpReturnToBlock   Op = 0x09 // copy results to block (before defer)
-	OpDefer           Op = 0x0A // defer call(X, [...])
-	OpGo              Op = 0x0B // go call(X, [...])
-	OpSelectCase      Op = 0x0C // exec next select case
-	OpSwitchCase      Op = 0x0D // exec next switch case
-	OpTypeSwitchCase  Op = 0x0E // exec next type switch case
-	OpForLoop1        Op = 0x0F // body and post if X, else break
-	OpIfCond          Op = 0x10 // body if X, else else
-	OpPopValue        Op = 0x11 // pop X
-	OpPopResults      Op = 0x12 // pop n call results
-	OpPopBlock        Op = 0x13 // pop block NOTE breaks certain invariants.
+	OpInvalid             Op = 0x00 // invalid
+	OpHalt                Op = 0x01 // halt (e.g. last statement)
+	OpNoop                Op = 0x02 // no-op
+	OpExec                Op = 0x03 // exec next statement
+	OpPrecall             Op = 0x04 // sets X (func) to frame
+	OpCall                Op = 0x05 // call(Frame.Func, [...])
+	OpCallNativeBody      Op = 0x06 // call body is native
+	OpReturn              Op = 0x07 // return ...
+	OpReturnFromBlock     Op = 0x08 // return results (after defers)
+	OpReturnToBlock       Op = 0x09 // copy results to block (before defer)
+	OpDefer               Op = 0x0A // defer call(X, [...])
+	OpCallDeferNativeBody Op = 0x0B // call body is native
+	OpGo                  Op = 0x0C // go call(X, [...])
+	OpSelect              Op = 0x0D // exec next select case
+	OpSwitchClause        Op = 0x0E // exec next switch clause
+	OpTypeSwitchClause    Op = 0x0F // exec next type switch clause
+	OpForLoop1            Op = 0x10 // body and post if X, else break
+	OpIfCond              Op = 0x11 // eval cond
+	OpPopValue            Op = 0x12 // pop X
+	OpPopResults          Op = 0x13 // pop n call results
+	OpPopBlock            Op = 0x14 // pop block NOTE breaks certain invariants.
 
 	/* Unary & binary operators */
 	OpUpos  Op = 0x20 // + (unary)
 	OpUneg  Op = 0x21 // - (unary)
 	OpUnot  Op = 0x22 // ! (unary)
 	OpUxor  Op = 0x23 // ^ (unary)
-	OpUstar Op = 0x24 // * (unary)
 	OpUrecv Op = 0x25 // <- (unary) // TODO make expr
 	OpLor   Op = 0x26 // ||
 	OpLand  Op = 0x27 // &&
@@ -470,21 +481,22 @@ const (
 	/* Other expression operators */
 	OpEval         Op = 0x40 // eval next expression
 	OpBinary1      Op = 0x41 // X op ?
-	OpIndex        Op = 0x42 // X[Y]
-	OpSelector     Op = 0x43 // X.Y
-	OpSlice        Op = 0x44 // X[Low:High:Max]
-	OpStar         Op = 0x45 // *X (deref or pointer-to)
-	OpRef          Op = 0x46 // &X
-	OpTypeAssert1  Op = 0x47 // X.(Type)
-	OpTypeAssert2  Op = 0x48 // (_, ok :=) X.(Type)
-	OpTypeOf       Op = 0x49 // X.(type)
-	OpCompositeLit Op = 0x4A // X{???}
-	OpArrayLit     Op = 0x4B // [Len]{...}
-	OpSliceLit     Op = 0x4C // []{...}
-	OpMapLit       Op = 0x4D // X{...}
-	OpStructLit    Op = 0x4E // X{...}
-	OpFuncLit      Op = 0x4F // func(T){Body}
-	OpConvert      Op = 0x50 // Y(X)
+	OpIndex1       Op = 0x42 // X[Y]
+	OpIndex2       Op = 0x43 // (_, ok :=) X[Y]
+	OpSelector     Op = 0x44 // X.Y
+	OpSlice        Op = 0x45 // X[Low:High:Max]
+	OpStar         Op = 0x46 // *X (deref or pointer-to)
+	OpRef          Op = 0x47 // &X
+	OpTypeAssert1  Op = 0x48 // X.(Type)
+	OpTypeAssert2  Op = 0x49 // (_, ok :=) X.(Type)
+	OpTypeOf       Op = 0x4A // X.(type)
+	OpCompositeLit Op = 0x4B // X{???}
+	OpArrayLit     Op = 0x4C // [Len]{...}
+	OpSliceLit     Op = 0x4D // []{...}
+	OpMapLit       Op = 0x4E // X{...}
+	OpStructLit    Op = 0x4F // X{...}
+	OpFuncLit      Op = 0x50 // func(T){Body}
+	OpConvert      Op = 0x51 // Y(X)
 
 	/* Native operators */
 	OpStructLitGoNative Op = 0x60
@@ -496,7 +508,7 @@ const (
 	OpSliceType     Op = 0x72 // []X{}
 	OpPointerType   Op = 0x73 // *X
 	OpInterfaceType Op = 0x74 // interface{...}
-	OpChanType      Op = 0x75 // chan[X]
+	OpChanType      Op = 0x75 // [<-]chan[<-]X
 	OpFuncType      Op = 0x76 // func(params...)results...
 	OpMapType       Op = 0x77 // map[X]Y
 	OpStructType    Op = 0x78 // struct{...}
@@ -523,9 +535,12 @@ const (
 
 	/* Loop (sticky) operators (>= 0xD0) */
 	OpSticky           Op = 0xD0 // not a real op.
-	OpForLoop2         Op = 0xD0
-	OpRangeIter        Op = 0xD1
-	OpReturnCallDefers Op = 0xD2
+	OpBody             Op = 0xD1 // if/block/switch/select.
+	OpForLoop2         Op = 0xD2
+	OpRangeIter        Op = 0xD3
+	OpRangeIterString  Op = 0xD4
+	OpRangeIterMap     Op = 0xD5
+	OpReturnCallDefers Op = 0xD6
 )
 
 //----------------------------------------
@@ -556,15 +571,17 @@ func (m *Machine) Run() {
 		case OpReturnToBlock:
 			m.doOpReturnToBlock()
 		case OpDefer:
-			panic("not yet implemented")
+			m.doOpDefer()
+		case OpCallDeferNativeBody:
+			m.doOpCallDeferNativeBody()
 		case OpGo:
 			panic("not yet implemented")
-		case OpSelectCase:
+		case OpSelect:
 			panic("not yet implemented")
-		case OpSwitchCase:
-			panic("not yet implemented")
-		case OpTypeSwitchCase:
-			panic("not yet implemented")
+		case OpSwitchClause:
+			m.doOpSwitchClause()
+		case OpTypeSwitchClause:
+			m.doOpTypeSwitchClause()
 		case OpForLoop1:
 			m.doOpForLoop1()
 		case OpIfCond:
@@ -580,6 +597,12 @@ func (m *Machine) Run() {
 			m.doOpUpos()
 		case OpUneg:
 			m.doOpUneg()
+		case OpUnot:
+			m.doOpUnot()
+		case OpUxor:
+			m.doOpUxor()
+		case OpUrecv:
+			m.doOpUrecv()
 		/* Binary operators */
 		case OpLor:
 			m.doOpLor()
@@ -624,8 +647,10 @@ func (m *Machine) Run() {
 			m.doOpEval()
 		case OpBinary1:
 			m.doOpBinary1()
-		case OpIndex:
-			m.doOpIndex()
+		case OpIndex1:
+			m.doOpIndex1()
+		case OpIndex2:
+			m.doOpIndex2()
 		case OpSelector:
 			m.doOpSelector()
 		case OpSlice:
@@ -666,6 +691,8 @@ func (m *Machine) Run() {
 			m.doOpArrayType()
 		case OpSliceType:
 			m.doOpSliceType()
+		case OpChanType:
+			m.doOpChanType()
 		case OpFuncType:
 			m.doOpFuncType()
 		case OpMapType:
@@ -708,9 +735,15 @@ func (m *Machine) Run() {
 		/* Decl operators */
 		// TODO
 		/* Loop (sticky) operators */
+		case OpBody:
+			m.doOpExec(op)
 		case OpForLoop2:
 			m.doOpExec(op)
 		case OpRangeIter:
+			m.doOpExec(op)
+		case OpRangeIterString:
+			m.doOpExec(op)
+		case OpRangeIterMap:
 			m.doOpExec(op)
 		case OpReturnCallDefers:
 			m.doOpReturnCallDefers()
@@ -779,8 +812,8 @@ func (m *Machine) PopStmt() Stmt {
 	if debug {
 		m.Printf("-s %v\n", s)
 	}
-	if as, ok := s.(*loopStmt); ok {
-		return as.PopActiveStmt()
+	if bs, ok := s.(*bodyStmt); ok {
+		return bs.PopActiveStmt()
 	} else {
 		// general case.
 		m.Stmts = m.Stmts[:numStmts-1]
@@ -856,10 +889,11 @@ func (m *Machine) PopValue() (tv *TypedValue) {
 	return tv
 }
 
-// Returns a slice of n values in the stack
-// and decrements NumValues.
-// The results are on the values stack, so they must be copied immediately.
-// NOTE the values are in stack order, oldest first, the opposite order of
+// Returns a slice of n values in the stack and decrements NumValues.
+// NOTE: The results are on the values stack, so they must be copied or used
+// immediately.  If you need to use the machine before or during usage,
+// consider using PopCopyValues().
+// NOTE: the values are in stack order, oldest first, the opposite order of
 // multiple pop calls.  This is used for params assignment, for example.
 func (m *Machine) PopValues(n int) []TypedValue {
 	if debug {
@@ -870,6 +904,14 @@ func (m *Machine) PopValues(n int) []TypedValue {
 	}
 	m.NumValues -= n
 	return m.Values[m.NumValues : m.NumValues+n]
+}
+
+// Like PopValues(), but copies the values onto a new slice.
+func (m *Machine) PopCopyValues(n int) []TypedValue {
+	res := make([]TypedValue, n)
+	ptvs := m.PopValues(n)
+	copy(res, ptvs)
+	return res
 }
 
 // Decrements NumValues by number of last results.
@@ -941,7 +983,7 @@ func (m *Machine) PushFrameBasic(s Stmt) {
 // TODO: track breaks/panics/returns on frame and
 // ensure the counts are consistent, otherwise we mask
 // bugs with frame pops.
-func (m *Machine) PushFrameCall(cx *CallExpr, fv *FuncValue, recv Value) {
+func (m *Machine) PushFrameCall(cx *CallExpr, fv *FuncValue, recv TypedValue) {
 	fr := Frame{
 		Source:      cx,
 		NumOps:      m.NumOps,
@@ -949,7 +991,6 @@ func (m *Machine) PushFrameCall(cx *CallExpr, fv *FuncValue, recv Value) {
 		NumExprs:    len(m.Exprs),
 		NumStmts:    len(m.Stmts),
 		NumBlocks:   len(m.Blocks),
-		BodyIndex:   0,
 		Func:        fv,
 		GoFunc:      nil,
 		Receiver:    recv,
@@ -989,10 +1030,9 @@ func (m *Machine) PushFrameGoNative(cx *CallExpr, fv *nativeValue) {
 		NumExprs:    len(m.Exprs),
 		NumStmts:    len(m.Stmts),
 		NumBlocks:   len(m.Blocks),
-		BodyIndex:   0,
 		Func:        nil,
 		GoFunc:      fv,
-		Receiver:    nil,
+		Receiver:    TypedValue{},
 		NumArgs:     len(cx.Args),
 		IsVarg:      cx.Varg,
 		Defers:      nil,
@@ -1026,8 +1066,15 @@ func (m *Machine) PopFrameAndReset() {
 	m.PopStmt() // may be sticky
 }
 
+// TODO: optimize by passing in last frame.
 func (m *Machine) PopFrameAndReturn() {
 	fr := m.PopFrame()
+	if debug {
+		// TODO: optimize with fr.IsCall
+		if fr.Func == nil && fr.GoFunc == nil {
+			panic("unexpected non-call (loop) frame")
+		}
+	}
 	rtypes := fr.Func.Type.Results
 	numRes := len(rtypes)
 	m.NumOps = fr.NumOps
@@ -1058,7 +1105,7 @@ func (m *Machine) PeekFrameAndContinueFor() {
 	m.Exprs = m.Exprs[:fr.NumExprs]
 	m.Stmts = m.Stmts[:fr.NumStmts+1]
 	m.Blocks = m.Blocks[:fr.NumBlocks+1]
-	ls := m.PeekStmt(1).(*loopStmt)
+	ls := m.PeekStmt(1).(*bodyStmt)
 	ls.BodyIndex = ls.BodyLen
 }
 
@@ -1069,7 +1116,7 @@ func (m *Machine) PeekFrameAndContinueRange() {
 	m.Exprs = m.Exprs[:fr.NumExprs]
 	m.Stmts = m.Stmts[:fr.NumStmts+1]
 	m.Blocks = m.Blocks[:fr.NumBlocks+1]
-	ls := m.PeekStmt(1).(*loopStmt)
+	ls := m.PeekStmt(1).(*bodyStmt)
 	ls.BodyIndex = ls.BodyLen
 }
 
@@ -1079,6 +1126,20 @@ func (m *Machine) NumFrames() int {
 
 func (m *Machine) LastFrame() *Frame {
 	return &m.Frames[len(m.Frames)-1]
+}
+
+// pops the last non-call (loop) frames
+// and returns the last call frame (which is left on stack).
+func (m *Machine) PopUntilLastCallFrame() *Frame {
+	for i := len(m.Frames) - 1; i >= 0; i-- {
+		fr := &m.Frames[i]
+		if fr.Func != nil || fr.GoFunc != nil {
+			// TODO: optimize with fr.IsCall
+			m.Frames = m.Frames[:i+1]
+			return fr
+		}
+	}
+	panic("missing call frame")
 }
 
 func (m *Machine) PushForPointer(lx Expr) {

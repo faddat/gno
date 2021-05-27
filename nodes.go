@@ -3,6 +3,7 @@ package gno
 import (
 	"fmt"
 	"reflect"
+	rdebug "runtime/debug"
 	"strconv"
 )
 
@@ -170,6 +171,7 @@ func (_ *ExprStmt) assertNode()          {}
 func (_ *ForStmt) assertNode()           {}
 func (_ *GoStmt) assertNode()            {}
 func (_ *IfStmt) assertNode()            {}
+func (_ *IfCaseStmt) assertNode()        {}
 func (_ *IncDecStmt) assertNode()        {}
 func (_ *LabeledStmt) assertNode()       {}
 func (_ *RangeStmt) assertNode()         {}
@@ -178,9 +180,9 @@ func (_ *SelectStmt) assertNode()        {}
 func (_ *SelectCaseStmt) assertNode()    {}
 func (_ *SendStmt) assertNode()          {}
 func (_ *SwitchStmt) assertNode()        {}
-func (_ *SwitchCaseStmt) assertNode()    {}
+func (_ *SwitchClauseStmt) assertNode()  {}
 func (_ *EmptyStmt) assertNode()         {}
-func (_ *loopStmt) assertNode()          {}
+func (_ *bodyStmt) assertNode()          {}
 func (_ *FuncDecl) assertNode()          {}
 func (_ *ImportDecl) assertNode()        {}
 func (_ *ValueDecl) assertNode()         {}
@@ -221,6 +223,7 @@ var _ = &ExprStmt{}
 var _ = &ForStmt{}
 var _ = &GoStmt{}
 var _ = &IfStmt{}
+var _ = &IfCaseStmt{}
 var _ = &IncDecStmt{}
 var _ = &LabeledStmt{}
 var _ = &RangeStmt{}
@@ -229,9 +232,9 @@ var _ = &SelectStmt{}
 var _ = &SelectCaseStmt{}
 var _ = &SendStmt{}
 var _ = &SwitchStmt{}
-var _ = &SwitchCaseStmt{}
+var _ = &SwitchClauseStmt{}
 var _ = &EmptyStmt{}
-var _ = &loopStmt{}
+var _ = &bodyStmt{}
 var _ = &FuncDecl{}
 var _ = &ImportDecl{}
 var _ = &ValueDecl{}
@@ -319,6 +322,7 @@ type IndexExpr struct { // X[Index]
 	Attributes
 	X     Expr // expression
 	Index Expr // index expression
+	HasOK bool // if true, is form: `value, ok := <X>[<Key>]
 }
 
 type SelectorExpr struct { // X.Sel
@@ -351,9 +355,9 @@ type RefExpr struct { // &X
 
 type TypeAssertExpr struct { // X.(Type)
 	Attributes
-	X     Expr // expression
-	Type  Expr // asserted type; nil means type switch X.(type)
-	HasOK bool // if true, is form: `_, ok := <X>.(<Type>)`
+	X     Expr // expression.
+	Type  Expr // asserted type, never nil.
+	HasOK bool // if true, is form: `_, ok := <X>.(<Type>)`.
 }
 
 // A UnaryExpr node represents a unary expression. Unary
@@ -413,7 +417,7 @@ type FuncLitExpr struct {
 	Attributes
 	StaticBlock
 	Type FuncTypeExpr // function type
-	Body Stmts        // function body
+	Body              // function body
 }
 
 // The preprocessor replaces const expressions
@@ -485,6 +489,22 @@ type FieldTypeExpr struct {
 
 type FieldTypeExprs []FieldTypeExpr
 
+func (ftxz FieldTypeExprs) IsNamed() bool {
+	named := false
+	for i, ftx := range ftxz {
+		if i == 0 {
+			named = ftx.Name != ""
+		} else {
+			if named && ftx.Name == "" {
+				panic("[]FieldTypeExpr has inconsistent namedness (starts named)")
+			} else if !named && ftx.Name != "" {
+				panic("[]FieldTypeExpr has inconsistent namedness (starts unnamed)")
+			}
+		}
+	}
+	return named
+}
+
 type ArrayTypeExpr struct {
 	Attributes
 	Len Expr // if nil, variadic array lit
@@ -500,6 +520,7 @@ type SliceTypeExpr struct {
 type InterfaceTypeExpr struct {
 	Attributes
 	Methods FieldTypeExprs // list of methods
+	Generic Name           // for uverse generics
 }
 
 type ChanDir int
@@ -552,29 +573,45 @@ type Stmt interface {
 	assertStmt()
 }
 
-type Stmts []Stmt
+type Body []Stmt
+
+func (ss Body) GetBody() Body {
+	return ss
+}
+
+func (ss Body) GetLabeledStmt(label Name) (Stmt, int) {
+	for i, stmt := range ss {
+		if ls, ok := stmt.(*LabeledStmt); ok {
+			return ls.Stmt, i
+		}
+	}
+	return nil, -1
+}
+
+//----------------------------------------
 
 // non-pointer receiver to help make immutable.
-func (*AssignStmt) assertStmt()     {}
-func (*BlockStmt) assertStmt()      {}
-func (*BranchStmt) assertStmt()     {}
-func (*DeclStmt) assertStmt()       {}
-func (*DeferStmt) assertStmt()      {}
-func (*EmptyStmt) assertStmt()      {} // useful for _ctif
-func (*ExprStmt) assertStmt()       {}
-func (*ForStmt) assertStmt()        {}
-func (*GoStmt) assertStmt()         {}
-func (*IfStmt) assertStmt()         {}
-func (*IncDecStmt) assertStmt()     {}
-func (*LabeledStmt) assertStmt()    {}
-func (*RangeStmt) assertStmt()      {}
-func (*ReturnStmt) assertStmt()     {}
-func (*SelectStmt) assertStmt()     {}
-func (*SelectCaseStmt) assertStmt() {}
-func (*SendStmt) assertStmt()       {}
-func (*SwitchStmt) assertStmt()     {}
-func (*SwitchCaseStmt) assertStmt() {}
-func (*loopStmt) assertStmt()       {}
+func (*AssignStmt) assertStmt()       {}
+func (*BlockStmt) assertStmt()        {}
+func (*BranchStmt) assertStmt()       {}
+func (*DeclStmt) assertStmt()         {}
+func (*DeferStmt) assertStmt()        {}
+func (*EmptyStmt) assertStmt()        {} // useful for _ctif
+func (*ExprStmt) assertStmt()         {}
+func (*ForStmt) assertStmt()          {}
+func (*GoStmt) assertStmt()           {}
+func (*IfStmt) assertStmt()           {}
+func (*IfCaseStmt) assertStmt()       {}
+func (*IncDecStmt) assertStmt()       {}
+func (*LabeledStmt) assertStmt()      {}
+func (*RangeStmt) assertStmt()        {}
+func (*ReturnStmt) assertStmt()       {}
+func (*SelectStmt) assertStmt()       {}
+func (*SelectCaseStmt) assertStmt()   {}
+func (*SendStmt) assertStmt()         {}
+func (*SwitchStmt) assertStmt()       {}
+func (*SwitchClauseStmt) assertStmt() {}
+func (*bodyStmt) assertStmt()         {}
 
 var _ Stmt = &AssignStmt{}
 var _ Stmt = &BlockStmt{}
@@ -586,6 +623,7 @@ var _ Stmt = &ExprStmt{}
 var _ Stmt = &ForStmt{}
 var _ Stmt = &GoStmt{}
 var _ Stmt = &IfStmt{}
+var _ Stmt = &IfCaseStmt{}
 var _ Stmt = &IncDecStmt{}
 var _ Stmt = &LabeledStmt{}
 var _ Stmt = &RangeStmt{}
@@ -594,8 +632,8 @@ var _ Stmt = &SelectStmt{}
 var _ Stmt = &SelectCaseStmt{}
 var _ Stmt = &SendStmt{}
 var _ Stmt = &SwitchStmt{}
-var _ Stmt = &SwitchCaseStmt{}
-var _ Stmt = &loopStmt{}
+var _ Stmt = &SwitchClauseStmt{}
+var _ Stmt = &bodyStmt{}
 
 type AssignStmt struct {
 	Attributes
@@ -607,13 +645,15 @@ type AssignStmt struct {
 type BlockStmt struct {
 	Attributes
 	StaticBlock
-	Body Stmts
+	Body
 }
 
 type BranchStmt struct {
 	Attributes
-	Op    Word // keyword word (BREAK, CONTINUE, GOTO, FALLTHROUGH)
-	Label Name // label name; or empty
+	Op        Word  // keyword word (BREAK, CONTINUE, GOTO, FALLTHROUGH)
+	Label     Name  // label name; or empty
+	Depth     uint8 // blocks to pop
+	BodyIndex int   // index of statement of body
 }
 
 type DeclStmt struct {
@@ -643,7 +683,7 @@ type ForStmt struct {
 	Init Stmt // initialization (simple) statement; or nil
 	Cond Expr // condition; or nil
 	Post Stmt // post iteration (simple) statement; or nil
-	Body Stmts
+	Body
 }
 
 type GoStmt struct {
@@ -657,10 +697,16 @@ type GoStmt struct {
 type IfStmt struct {
 	Attributes
 	StaticBlock
-	Init Stmt  // initialization (simple) statement; or nil
-	Cond Expr  // condition; or nil
-	Body Stmts // body statements
-	Else Stmts // else statements
+	Init Stmt       // initialization (simple) statement; or nil
+	Cond Expr       // condition; or nil
+	Then IfCaseStmt // body statements
+	Else IfCaseStmt // else statements
+}
+
+type IfCaseStmt struct {
+	Attributes
+	StaticBlock
+	Body
 }
 
 type IncDecStmt struct {
@@ -681,7 +727,9 @@ type RangeStmt struct {
 	X          Expr // value to range over
 	Key, Value Expr // Key, Value may be nil
 	Op         Word // ASSIGN or DEFINE
-	Body       Stmts
+	Body
+	IsMap    bool // if X is map type
+	IsString bool // if X is string type
 }
 
 type ReturnStmt struct {
@@ -698,7 +746,7 @@ type SelectCaseStmt struct {
 	Attributes
 	StaticBlock
 	Comm Stmt // send or receive statement; nil means default case
-	Body Stmts
+	Body
 }
 
 type SendStmt struct {
@@ -713,51 +761,57 @@ type SendStmt struct {
 type SwitchStmt struct {
 	Attributes
 	StaticBlock
-	Init    Stmt             // initialization (simple) statement; or nil.
-	X       Expr             // tag or _.(type) expression; or nil.
-	Cases   []SwitchCaseStmt // cases
-	VarName Name             // tag or type-switched value.
+	Init         Stmt               // init (simple) stmt; or nil.
+	X            Expr               // tag or _.(type) expr; or nil.
+	IsTypeSwitch bool               // true iff X is .(type) expr.
+	Clauses      []SwitchClauseStmt // cases
+	VarName      Name               // tag or type-switched value.
 }
 
-type SwitchCaseStmt struct {
+type SwitchClauseStmt struct {
 	Attributes
 	StaticBlock
 	Cases Exprs // list of expressions or types; nil means default case
-	Body  Stmts
+	Body
 }
 
 //----------------------------------------
-// Loop Statement (persistent)
+// bodyStmt (persistent)
 
-type loopStmt struct {
+// NOTE: embedded in Block.
+type bodyStmt struct {
 	Attributes
-	ForStmt   *ForStmt
-	RangeStmt *RangeStmt
-	ListLen   int  // for RangeStmt only
-	ListIndex int  // for RangeStmt only
-	BodyLen   int  // for continue
-	BodyIndex int  // init:-2, cond/elem:-1, body:0..., post:n
-	Active    Stmt // for PopStmt().
+	Body                   // for non-loop stmts
+	BodyLen   int          // for for-continue
+	BodyIndex int          // init:-2, cond/elem:-1, body:0..., post:n
+	NumOps    int          // number of Ops, for goto
+	NumStmts  int          // number of Stmts, for goto
+	Cond      Expr         // for ForStmt
+	Post      Stmt         // for ForStmt
+	Active    Stmt         // for PopStmt()
+	Key       Expr         // for RangeStmt
+	Value     Expr         // for RangeStmt
+	Op        Word         // for RangeStmt
+	ListLen   int          // for RangeStmt only
+	ListIndex int          // for RangeStmt only
+	NextItem  *MapListItem // fpr RangeStmt w/ maps only
+	StrLen    int          // for RangeStmt w/ strings only
+	StrIndex  int          // for RangeStmt w/ strings only
+	NextRune  rune         // for RangeStmt w/ strings only
 }
 
-func (s *loopStmt) PopActiveStmt() (as Stmt) {
+func (s *bodyStmt) PopActiveStmt() (as Stmt) {
 	as = s.Active
 	s.Active = nil
 	return
 }
 
-func (s *loopStmt) String() string {
-	if s.ForStmt != nil {
-		return fmt.Sprintf("loopStmt[%s %d]",
-			s.ForStmt.String(),
-			s.BodyIndex)
-	} else {
-		return fmt.Sprintf("loopStmt[%s %d/%d/%d]",
-			s.RangeStmt.String(),
-			s.ListLen,
-			s.ListIndex,
-			s.BodyIndex)
-	}
+func (s *bodyStmt) String() string {
+	return fmt.Sprintf("bodyStmt[%d/%d/%d]=%v",
+		s.ListLen,
+		s.ListIndex,
+		s.BodyIndex,
+		s.Active)
 }
 
 //----------------------------------------
@@ -809,7 +863,7 @@ type FuncDecl struct {
 	IsMethod bool
 	Recv     FieldTypeExpr // receiver (if method); or empty (if function)
 	Type     FuncTypeExpr  // function signature: parameters and results
-	Body     Stmts         // function body; or empty for external (non-Go) function
+	Body                   // function body; or empty for external (non-Go) function
 }
 
 type ImportDecl struct {
@@ -879,13 +933,13 @@ func (fs *FileSet) GetFileByName(n Name) *FileNode {
 func (fs *FileSet) GetDeclFor(n Name) (*FileNode, *Decl) {
 	// XXX index to bound to linear time.
 	for _, fn := range fs.Files {
-		for i, dn := range fn.Body {
+		for i, dn := range fn.Decls {
 			if _, isImport := dn.(*ImportDecl); isImport {
 				continue
 			}
 			if dn.GetName() == n {
 				// found the decl that declares n.
-				return fn, &fn.Body[i]
+				return fn, &fn.Decls[i]
 			}
 		}
 	}
@@ -902,7 +956,7 @@ type FileNode struct {
 	StaticBlock
 	Name
 	PkgName Name
-	Body    Decls
+	Decls
 }
 
 type PackageNode struct {
@@ -992,12 +1046,12 @@ func (pn *PackageNode) UpdatePackage(pv *PackageValue) []TypedValue {
 				if dt, ok := nt.(*DeclaredType); ok {
 					for i := 0; i < len(dt.Methods); i++ {
 						mv := dt.Methods[i].V.(*FuncValue)
+						if mv.Closure != nil {
+							// This happens with alias declarations.
+						}
 						// set mv.pkg.
 						mv.pkg = pv
 						// set mv.Closure.
-						if mv.Closure != nil {
-							panic("expected nil closure for static method")
-						}
 						fn, _ := pn.GetDeclFor(dt.Name)
 						fb := pv.FBlocks[fn.Name]
 						mv.Closure = fb
@@ -1036,6 +1090,7 @@ type BlockNode interface {
 	GetStaticTypeOf(Name) Type
 	GetStaticTypeOfAt(ValuePath) Type
 	Define(Name, TypedValue)
+	GetBody() Body
 }
 
 //----------------------------------------
@@ -1105,19 +1160,24 @@ func (sb *StaticBlock) GetPathForName(n Name) ValuePath {
 			panic("should not happen")
 		}
 	}
-	gen := uint16(1)
-	idx, ok := sb.GetLocalIndex(n)
-	bp := sb.GetParent()
-	for {
-		if ok {
-			return NewValuePath(n, gen, idx)
-		} else if bp != nil {
-			idx, ok = bp.GetLocalIndex(n)
-			bp = bp.GetParent()
-			gen++
-		} else {
-			panic(fmt.Sprintf("name %s not declared", n))
+	gen := 1
+	if idx, ok := sb.GetLocalIndex(n); ok {
+		return NewValuePathBlock(uint8(gen), idx, n)
+	} else {
+		gen++
+		bp := sb.GetParent()
+		for bp != nil {
+			if idx, ok = bp.GetLocalIndex(n); ok {
+				return NewValuePathBlock(uint8(gen), idx, n)
+			} else {
+				bp = bp.GetParent()
+				gen++
+				if 0xff < gen {
+					panic("value path depth overflow")
+				}
+			}
 		}
+		panic(fmt.Sprintf("name %s not declared", n))
 	}
 }
 
@@ -1250,13 +1310,31 @@ func (sb *StaticBlock) SetStaticBlock(osb StaticBlock) {
 var _ BlockNode = &FuncLitExpr{}
 var _ BlockNode = &BlockStmt{}
 var _ BlockNode = &ForStmt{}
-var _ BlockNode = &IfStmt{}
+var _ BlockNode = &IfStmt{} // faux block node
+var _ BlockNode = &IfCaseStmt{}
 var _ BlockNode = &RangeStmt{}
 var _ BlockNode = &SelectCaseStmt{}
-var _ BlockNode = &SwitchCaseStmt{}
+var _ BlockNode = &SwitchStmt{} // faux block node
+var _ BlockNode = &SwitchClauseStmt{}
 var _ BlockNode = &FuncDecl{}
 var _ BlockNode = &FileNode{}
 var _ BlockNode = &PackageNode{}
+
+func (ifs *IfStmt) GetBody() Body {
+	panic("IfStmt has no body (but .Then and .Else do)")
+}
+
+func (ifs *SwitchStmt) GetBody() Body {
+	panic("SwitchStmt has no body (but its cases do)")
+}
+
+func (fn *FileNode) GetBody() Body {
+	panic("FileNode has no body (but it does have .Decls)")
+}
+
+func (pn *PackageNode) GetBody() Body {
+	panic("PackageNode has no body")
+}
 
 //----------------------------------------
 // Value Path
@@ -1267,42 +1345,156 @@ var _ BlockNode = &PackageNode{}
 //  (c) a DeclaredType method
 //  (d) a PackageNode declaration
 //
-// It is not used for interface methods, they are looked up by
-// name, and thus is slower.
-//
-// Depth 0 is reserved for the global uverse namespace, so
-// local names have generation 1 and so on.  Depth 0 and index
-// 0 refers to the untyped nil value (as first defined in
-// uverse.go).
-//
-// In declared types, the methods have generation 1 and if the
-// underlying type is a struct, the fields of that have
-// generation 2.  For undeclared structs, the fields have
-// generation 1.  There is currently no javascript prototype or
-// inheritance, so generation 3 and above are illegal (though
-// could may change in the future).  In all cases, generation 0
-// is reserved for global fields, such as x.type. Embedded
-// structs are always flattened for efficient access.
-//
+// Depth tells how many layers of access should be unvealed before
+// arriving at the ultimate handler type.  In the case of Blocks,
+// the depth tells how many layers of ancestry to ascend before
+// arriving at the target block.  For other selector expr paths
+// such as those for *DeclaredType methods or *StructType fields,
+// see tests/selector_test.go.
 type ValuePath struct {
-	// 0 for uverse, or num parents to traverse +1.
-	Depth uint16
-	// index of TV in aforementioned
-	// block/struct/package/declared-type.
-	Index uint16
-	Name  Name
+	Type  VPType // see VPType* consts.
+	Depth uint8  // see doc for ValuePath.
+	Index uint16 // index of value, field, or method.
+	Name  Name   // name of value, field, or method.
 }
 
-func NewValuePath(n Name, depth, index uint16) ValuePath {
-	return ValuePath{
+type VPType uint8
+
+const (
+	VPUverse         VPType = 0x00
+	VPBlock          VPType = 0x01 // blocks and packages
+	VPField          VPType = 0x02
+	VPValMethod      VPType = 0x03
+	VPPtrMethod      VPType = 0x04
+	VPInterface      VPType = 0x05
+	VPDerefField     VPType = 0x12 // 0x10 + VPField
+	VPDerefValMethod VPType = 0x13 // 0x10 + VPValMethod
+	VPDerefPtrMethod VPType = 0x14 // 0x10 + VPPtrMethod
+	VPDerefInterface VPType = 0x15 // 0x10 + VPInterface
+	VPNative         VPType = 0x20
+	// 0x3X, 0x5X, 0x7X, 0x9X, 0xAX, 0xCX, 0xEX reserved.
+)
+
+func NewValuePath(t VPType, depth uint8, index uint16, n Name) ValuePath {
+	if t == VPField && n == "Root" {
+		rdebug.PrintStack()
+	}
+	vp := ValuePath{
+		Type:  t,
 		Depth: depth,
 		Index: index,
 		Name:  n,
 	}
+	vp.Validate()
+	return vp
 }
 
-func (vp ValuePath) IsZero() bool {
-	return vp.Depth == 0 && vp.Index == 0
+func NewValuePathUverse(index uint16, n Name) ValuePath {
+	return NewValuePath(VPUverse, 0, uint16(index), n)
+}
+
+func NewValuePathBlock(depth uint8, index uint16, n Name) ValuePath {
+	return NewValuePath(VPBlock, depth, index, n)
+}
+
+func NewValuePathField(depth uint8, index uint16, n Name) ValuePath {
+	return NewValuePath(VPField, depth, index, n)
+}
+
+func NewValuePathValMethod(index uint16, n Name) ValuePath {
+	return NewValuePath(VPValMethod, 0, index, n)
+}
+
+func NewValuePathPtrMethod(index uint16, n Name) ValuePath {
+	return NewValuePath(VPPtrMethod, 0, index, n)
+}
+
+func NewValuePathInterface(n Name) ValuePath {
+	return NewValuePath(VPInterface, 0, 0, n)
+}
+
+func NewValuePathDerefField(depth uint8, index uint16, n Name) ValuePath {
+	return NewValuePath(VPDerefField, depth, index, n)
+}
+
+func NewValuePathDerefValMethod(index uint16, n Name) ValuePath {
+	return NewValuePath(VPDerefValMethod, 0, index, n)
+}
+
+func NewValuePathDerefPtrMethod(index uint16, n Name) ValuePath {
+	return NewValuePath(VPDerefPtrMethod, 0, index, n)
+}
+
+func NewValuePathDerefInterface(n Name) ValuePath {
+	return NewValuePath(VPDerefInterface, 0, 0, n)
+}
+
+func NewValuePathNative(n Name) ValuePath {
+	return NewValuePath(VPNative, 0, 0, n)
+}
+
+func (vp ValuePath) Validate() {
+	switch vp.Type {
+	case VPUverse:
+		if vp.Depth != 0 {
+			panic("uverse value path must have depth 0")
+		}
+	case VPBlock:
+		// 0 ok ("_" blank)
+	case VPField:
+		// 0 ok
+	case VPValMethod:
+		if vp.Depth != 0 {
+			panic("method value path must have depth 0")
+		}
+	case VPPtrMethod:
+		if vp.Depth != 0 {
+			panic("ptr receiver method value path must have depth 0")
+		}
+	case VPInterface:
+		if vp.Depth != 0 {
+			panic("interface method value path must have depth 0")
+		}
+		if vp.Name == "" {
+			panic("interface value path must have name")
+		}
+	case VPDerefField:
+		// 0 ok
+	case VPDerefValMethod:
+		if vp.Depth != 0 {
+			panic("(deref) method value path must have depth 0")
+		}
+	case VPDerefPtrMethod:
+		if vp.Depth != 0 {
+			panic("(deref) ptr receiver method value path must have depth 0")
+		}
+	case VPDerefInterface:
+		if vp.Depth != 0 {
+			panic("(deref) interface method value path must have depth 0")
+		}
+		if vp.Name == "" {
+			panic("(deref) interface value path must have name")
+		}
+	case VPNative:
+		if vp.Depth != 0 {
+			panic("native value path must have depth 0")
+		}
+		if vp.Name == "" {
+			panic("native value path must have name")
+		}
+	default:
+		panic(fmt.Sprintf(
+			"unexpected value path type %X",
+			vp.Type))
+	}
+}
+
+func (vp ValuePath) IsBlockBlankPath() bool {
+	return vp.Type == VPBlock && vp.Depth == 0 && vp.Index == 0
+}
+
+func (vp ValuePath) IsDerefType() bool {
+	return vp.Type&0x10 > 0
 }
 
 type ValuePather interface {

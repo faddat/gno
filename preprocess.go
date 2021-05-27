@@ -39,9 +39,9 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 			debug.Printf("Transcribe %s (%v) stage:%v\n", n.String(), reflect.TypeOf(n), stage)
 		}
 
-		// if already preprocessed, break and do nothing.
+		// if already preprocessed, skip it.
 		if n.GetAttribute(ATTR_PREPROCESSED) == true {
-			return n, TRANS_BREAK
+			return n, TRANS_SKIP
 		}
 
 		switch stage {
@@ -56,10 +56,11 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					for _, lx := range n.Lhs {
 						ln := lx.(*NameExpr).Name
 						if ln == "_" {
-							panic("cannot define special name \"_\"")
+							// ignore.
+						} else {
+							// initial declaration to be re-defined.
+							last.Define(ln, anyValue(nil))
 						}
-						// initial declaration to be re-defined.
-						last.Define(ln, anyValue(nil))
 					}
 				} else {
 					// nothing defined.
@@ -67,16 +68,31 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 
 			// TRANS_ENTER -----------------------
 			case *ImportDecl, *ValueDecl, *TypeDecl, *FuncDecl:
-				// NOTE func decl usually must happen with a file, and so
-				// last is usually a *FileNode, but for testing
-				// convenience we allow importing directly onto the
-				// package. Uverse requires this.
+				// NOTE func decl usually must happen with a
+				// file, and so last is usually a *FileNode,
+				// but for testing convenience we allow
+				// importing directly onto the package.
+				// Uverse requires this.
 				if n.GetAttribute(ATTR_PREDEFINED) == true {
 					// skip declarations already predefined
 					// (e.g. through recursion for a dependent)
 				} else {
 					// recursively predefine dependencies.
-					predefineNow(imp, last, n.(Decl))
+					d2, ppd := predefineNow(imp, last, n.(Decl))
+					if ppd {
+						return d2, TRANS_SKIP
+					} else {
+						return d2, TRANS_CONTINUE
+					}
+				}
+
+			// TRANS_ENTER -----------------------
+			case *FuncTypeExpr:
+				for i, _ := range n.Params {
+					p := &n.Params[i]
+					if p.Name == "" {
+						p.Name = "_"
+					}
 				}
 
 			}
@@ -99,21 +115,72 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 
 			// TRANS_BLOCK -----------------------
 			case *IfStmt:
+				// create faux block to store .Init.
+				// the contents are copied onto the case block
+				// in the if case below for .Body and .Else.
+				// NOTE: similar to *SwitchStmt.
 				pushBlock(n, &last, &stack)
+
+			// TRANS_BLOCK -----------------------
+			case *IfCaseStmt:
+				pushRealBlock(n, &last, &stack)
+				// parent if statement.
+				ifs := ns[len(ns)-1].(*IfStmt)
+				// anything declared in ifs are copied.
+				for _, n := range ifs.GetNames() {
+					tv := ifs.GetValueRef(n)
+					last.Define(n, *tv)
+				}
 
 			// TRANS_BLOCK -----------------------
 			case *RangeStmt:
 				pushBlock(n, &last, &stack)
+				// NOTE: preprocess it here, so type can
+				// be used to set n.IsMap/IsString and
+				// define key/value.
+				n.X = Preprocess(imp, last, n.X).(Expr)
+				xt := evalTypeOf(last, n.X)
+				switch xt.Kind() {
+				case MapKind:
+					n.IsMap = true
+				case StringKind:
+					n.IsString = true
+				}
 				// key value if define.
 				if n.Op == DEFINE {
-					if n.Key != nil {
-						kn := n.Key.(*NameExpr).Name
-						last.Define(kn, anyValue(IntType))
-					}
-					if n.Value != nil {
-						// initial declaration to be re-defined.
-						vn := n.Value.(*NameExpr).Name
-						last.Define(vn, anyValue(nil))
+					if xt.Kind() == MapKind {
+						if n.Key != nil {
+							kt := baseOf(xt).(*MapType).Key
+							kn := n.Key.(*NameExpr).Name
+							last.Define(kn, anyValue(kt))
+						}
+						if n.Value != nil {
+							vt := baseOf(xt).(*MapType).Value
+							vn := n.Value.(*NameExpr).Name
+							last.Define(vn, anyValue(vt))
+						}
+					} else if xt.Kind() == StringKind {
+						if n.Key != nil {
+							it := IntType
+							kn := n.Key.(*NameExpr).Name
+							last.Define(kn, anyValue(it))
+						}
+						if n.Value != nil {
+							et := Int32Type
+							vn := n.Value.(*NameExpr).Name
+							last.Define(vn, anyValue(et))
+						}
+					} else {
+						if n.Key != nil {
+							it := IntType
+							kn := n.Key.(*NameExpr).Name
+							last.Define(kn, anyValue(it))
+						}
+						if n.Value != nil {
+							et := xt.Elem()
+							vn := n.Value.(*NameExpr).Name
+							last.Define(vn, anyValue(et))
+						}
 					}
 				}
 
@@ -128,14 +195,14 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					last.Define(p.Name, anyValue(p.Type))
 				}
 				// define results in new block.
-				for i, r := range ft.Results {
-					if 0 < len(r.Name) {
-						last.Define(r.Name, anyValue(r.Type))
+				for i, rf := range ft.Results {
+					if 0 < len(rf.Name) {
+						last.Define(rf.Name, anyValue(rf.Type))
 					} else {
 						// create a hidden var with leading dot.
 						// NOTE: document somewhere.
 						rn := fmt.Sprintf(".res_%d", i)
-						last.Define(Name(rn), anyValue(r.Type))
+						last.Define(Name(rn), anyValue(rf.Type))
 					}
 				}
 
@@ -148,73 +215,75 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 				// create faux block to store .Init/.Varname.
 				// the contents are copied onto the case block
 				// in the switch case below for switch cases.
+				// NOTE: similar to *IfStmt, but with the major
+				// difference that each clause block may have
+				// different number of values.
+				// To support the .Init statement and for
+				// conceptual simplicity, we create a block in
+				// OpExec.SwitchStmt, but since we don't initially
+				// know which clause will match, we expand the
+				// block once a clause has matched.
 				pushBlock(n, &last, &stack)
+				if n.VarName != "" {
+					// NOTE: this defines for default clauses too,
+					// see comment on block copying @
+					// SwitchClauseStmt:TRANS_BLOCK.
+					last.Define(n.VarName, anyValue(nil))
+				}
 
 			// TRANS_BLOCK -----------------------
-			case *SwitchCaseStmt:
-				pushBlock(n, &last, &stack)
+			case *SwitchClauseStmt:
+				pushRealBlock(n, &last, &stack)
 				// parent switch statement.
 				ss := ns[len(ns)-1].(*SwitchStmt)
-				// anything declared in ss are copied.
+				// anything declared in ss are copied,
+				// namely ss.VarName if defined.
 				for _, n := range ss.GetNames() {
 					tv := ss.GetValueRef(n)
 					last.Define(n, *tv)
 				}
-				// maybe type-switch def.
-				if 0 < len(ss.VarName) {
-					// if there is only 1 case, the define applies.  if
-					// there are multiple, the definition is void(?),
-					// TODO TestSwitchDefine
-					if len(n.Cases) == 1 {
-						ct := evalType(last, n.Cases[0])
-						last.Define(ss.VarName, anyValue(ct))
+				if ss.IsTypeSwitch {
+					// evaluate case types.
+					for i, cx := range n.Cases {
+						cx = Preprocess(
+							imp, last, cx).(Expr)
+						ct := evalType(last, cx)
+						n.Cases[i] = constType(cx, ct)
+						// maybe type-switch def.
+						if 0 < len(ss.VarName) {
+							if len(n.Cases) == 1 {
+								// If there is only 1 case, the
+								// define applies with type.
+								// (re-definition).
+								last.Define(
+									ss.VarName, anyValue(ct))
+							} else {
+								// If there are 2 or more
+								// cases, the definition is
+								// void(?).  TODO make
+								// TestSwitchDefine case.
+							}
+						}
 					}
 				}
 
 			// TRANS_BLOCK -----------------------
 			case *FuncDecl:
 				// retrieve cached function type.
-				ft := evalType(last, &n.Type).(*FuncType)
+				ft := getType(&n.Type).(*FuncType)
 				if n.IsMethod {
-					// set method onto declared type.
-					rft := evalType(last, &n.Recv).(FieldType)
-					ft = ft.UnboundType(rft)
-					rt := rft.Type
-					dt := (*DeclaredType)(nil)
-					if pt, ok := rt.(PointerType); ok {
-						dt = pt.Elem().(*DeclaredType)
-					} else {
-						dt = rt.(*DeclaredType)
-					}
-					dt.DefineMethod(&FuncValue{
-						Type:       ft,
-						IsMethod:   true,
-						Source:     n,
-						Name:       n.Name,
-						Body:       n.Body,
-						Closure:    nil, // set later, see UpdatePackage().
-						NativeBody: nil,
-						FileName:   filenameOf(last),
-						pkg:        nil, // set later, see UpdatePackage().
-					})
+					// recv/type set @ predefineNow().
 				} else {
-					// type fills in @ predefineNow().
-					/*
-						// fill in ft constructed at
-						// *FuncDecl:ENTER.
-						tv := last.GetValueRef(n.Name)
-						fv := tv.V.(*FuncValue)
-						*(fv.Type) = *ft
-					*/
+					// type set @ predefineNow().
 				}
 
 				// push func body block.
-				parent := last
 				pushBlock(n, &last, &stack)
 				// define receiver in new block, if method.
 				if n.IsMethod {
 					if 0 < len(n.Recv.Name) {
-						rt := evalType(parent, n.Recv.Type)
+						rft := getType(&n.Recv).(FieldType)
+						rt := rft.Type
 						last.Define(n.Recv.Name, anyValue(rt))
 					}
 				}
@@ -223,13 +292,13 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					last.Define(p.Name, anyValue(p.Type))
 				}
 				// define results in new block.
-				for i, r := range ft.Results {
-					if 0 < len(r.Name) {
-						last.Define(r.Name, anyValue(r.Type))
+				for i, rf := range ft.Results {
+					if 0 < len(rf.Name) {
+						last.Define(rf.Name, anyValue(rf.Type))
 					} else {
 						// create a hidden var with leading dot.
 						rn := fmt.Sprintf(".res_%d", i)
-						last.Define(Name(rn), anyValue(r.Type))
+						last.Define(Name(rn), anyValue(rf.Type))
 					}
 				}
 
@@ -238,22 +307,77 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 				// only for imports.
 				pushBlock(n, &last, &stack)
 				{
-					// support out-of-order declarations.  this is required
-					// separately from the direct predefineNow() entry
-					// callbacks above, for otherwise out-of-order declarations
-					// would not get pre-defined before (say) the body of a
-					// function declaration or literl can refer to it.
-					// (this must happen after pushBlock above, otherwise it
-					// would happen @ *FileNode:ENTER)
-					for _, d := range n.Body {
-						if d.GetAttribute(ATTR_PREDEFINED) == true {
-							// skip declarations already predefined
-							// (e.g. through recursion for a dependent)
-						} else {
-							// recursively predefine dependencies.
-							predefineNow(imp, n, d)
+					// This logic supports out-of-order
+					// declarations.  this is required
+					// separately from the direct
+					// predefineNow() entry callbacks above,
+					// for otherwise out-of-order
+					// declarations would not get pre-defined
+					// before (say) the body of a function
+					// declaration or literl can refer to it.
+					// (this must happen after pushBlock
+					// above, otherwise it would happen @
+					// *FileNode:ENTER)
+
+					// Predefine all type decls and import decls.
+					for i := 0; i < len(n.Decls); i++ {
+						d := n.Decls[i]
+						switch d.(type) {
+						case *ImportDecl, *TypeDecl:
+							if d.GetAttribute(ATTR_PREDEFINED) == true {
+								// skip declarations already
+								// predefined (e.g. through
+								// recursion for a dependent)
+							} else {
+								// recursively predefine
+								// dependencies.
+								d2, _ := predefineNow(imp, n, d)
+								n.Decls[i] = d2
+							}
 						}
 					}
+					// Then, preprocess all type decls.
+					for i := 0; i < len(n.Decls); i++ {
+						d := n.Decls[i]
+						switch d.(type) {
+						case *TypeDecl:
+							d2 := Preprocess(imp, last, d).(Decl)
+							n.Decls[i] = d2
+						}
+					}
+					// Then, predefine all func/method decls.
+					for i := 0; i < len(n.Decls); i++ {
+						d := n.Decls[i]
+						switch d.(type) {
+						case *FuncDecl:
+							if d.GetAttribute(ATTR_PREDEFINED) == true {
+								// skip declarations already
+								// predefined (e.g. through
+								// recursion for a dependent)
+							} else {
+								// recursively predefine
+								// dependencies.
+								d2, _ := predefineNow(imp, n, d)
+								n.Decls[i] = d2
+							}
+						}
+					}
+					// Finally, predefine other decls and
+					// preprocess ValueDecls..
+					for i := 0; i < len(n.Decls); i++ {
+						d := n.Decls[i]
+						if d.GetAttribute(ATTR_PREDEFINED) == true {
+							// skip declarations already
+							// predefined (e.g. through
+							// recursion for a dependent)
+						} else {
+							// recursively predefine
+							// dependencies.
+							d2, _ := predefineNow(imp, n, d)
+							n.Decls[i] = d2
+						}
+					}
+					// After return, the other decls get preprocessed.
 				}
 
 			// TRANS_BLOCK -----------------------
@@ -268,20 +392,21 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 			// in evalType().
 			n.SetAttribute(ATTR_PREPROCESSED, true)
 
-			//-There is still work to be done while leaving, but once the
-			//logic of that is done, we will have to perform additionally
-			//deferred logic that is best handled with orthogonal switch
-			//conditions.
-			//-For example, while leaving nodes w/ TRANS_COMPOSITE_TYPE,
-			//(regardless of whether name or literal), any elided type
-			//names are inserted. (This works because the transcriber
-			//leaves the composite type before entering the kv elements.)
+			//-There is still work to be done while leaving, but
+			//once the logic of that is done, we will have to
+			//perform additionally deferred logic that is best
+			//handled with orthogonal switch conditions.
+			//-For example, while leaving nodes w/
+			//TRANS_COMPOSITE_TYPE, (regardless of whether name or
+			//literal), any elided type names are inserted. (This
+			//works because the transcriber leaves the composite
+			//type before entering the kv elements.)
 			defer func() {
 				switch ftype {
 
 				// TRANS_LEAVE (deferred)---------
 				case TRANS_COMPOSITE_TYPE:
-					// fill elided element composite lit type exprs.
+					// fill elided element composite lit type exprs
 					clx := ns[len(ns)-1].(*CompositeLitExpr)
 					// get or evaluate composite type.
 					clt := evalType(last, n.(Expr))
@@ -311,13 +436,10 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					case *nativeType:
 						switch bt.Type.Kind() {
 						case reflect.Struct:
-							// NOTE Gno embedded fields are flattened,
-							// whereas in Go fields are nested, and a
-							// complete index is a slice of indices.  For
-							// simplicity and some degree of flexibility,
-							// do not use path indices for Go native
-							// types, but use the name.
-							n.Path = NewValuePath(n.Name, 0, 0)
+							// NOTE: For simplicity and some degree of
+							// flexibility, do not use path indices for Go
+							// native types, but use the name.
+							n.Path = NewValuePathNative(n.Name)
 							return n, TRANS_CONTINUE
 						case reflect.Array, reflect.Slice:
 							// Replace n with *constExpr.
@@ -332,7 +454,7 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 				// specific and general cases
 				switch n.Name {
 				case "_":
-					n.Path.Name = "_"
+					n.Path = NewValuePathBlock(0, 0, "_")
 					return n, TRANS_CONTINUE
 				case "iota":
 					pd := lastDecl(ns)
@@ -340,12 +462,13 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					cx := constUntypedBigint(n, int64(io))
 					return cx, TRANS_CONTINUE
 				case "nil":
-					// nil will be converted to typed-nils when appropriate
-					// upon leaving the expression nodes that contain nil
-					// nodes.
+					// nil will be converted to typed-nils when
+					// appropriate upon leaving the expression
+					// nodes that contain nil nodes.
 					fallthrough
 				default:
 					fillNameExprPath(last, n)
+					// If uverse, return a *constExpr.
 					if n.Path.Depth == 0 { // uverse
 						cv := evalConst(last, n)
 						// built-in functions must be called.
@@ -358,6 +481,12 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 						}
 						return cv, TRANS_CONTINUE
 					}
+					// If untyped const, return it as *constExpr.
+					nt := evalTypeOf(last, n)
+					if isUntyped(nt) {
+						cx := evalConst(last, n)
+						return cx, TRANS_CONTINUE
+					}
 				}
 
 			// TRANS_LEAVE -----------------------
@@ -368,10 +497,10 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 
 			// TRANS_LEAVE -----------------------
 			case *BinaryExpr:
-				// Replace with *constExpr if const operands.
-				isShift := n.Op == SHL || n.Op == SHR
+				lt := evalTypeOf(last, n.Left)
 				rt := evalTypeOf(last, n.Right)
 				// Special (recursive) case if shift and right isn't uint.
+				isShift := n.Op == SHL || n.Op == SHR
 				if isShift && baseOf(rt) != UintType {
 					// convert n.Right to (gno) uint type,
 					rn := Expr(Call("uint", n.Right))
@@ -389,9 +518,12 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 				rcx, ric := n.Right.(*constExpr)
 				if lic {
 					if ric {
+						// Left const, Right const ----------------------
+						// Replace with *constExpr if const operands.
 						cv := evalConst(last, n)
 						return cv, TRANS_CONTINUE
 					} else if isUntyped(lcx.T) {
+						// Left untyped const, Right not ----------------
 						if rnt, ok := rt.(*nativeType); ok {
 							if isShift {
 								panic("should not happen")
@@ -399,7 +531,7 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 							// get concrete native base type.
 							pt := go2GnoBaseType(rnt.Type).(PrimitiveType)
 							// convert n.Left to pt type,
-							convertIfConst(last, n.Left, pt)
+							checkOrConvertType(last, n.Left, pt)
 							// convert n.Right to (gno) pt type,
 							rn := Expr(Call(pt.String(), n.Right))
 							// and convert result back.
@@ -423,28 +555,31 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 								// nothing to do, right type is (already) uint type.
 							} else {
 								// convert n.Left to right type.
-								convertIfConst(last, n.Left, rt)
+								checkOrConvertType(last, n.Left, rt)
 							}
 						}
+					} else if lcx.T == nil {
+						// convert n.Left to typed-nil type.
+						checkOrConvertType(last, n.Left, rt)
 					}
-				} else {
-					if ric && isUntyped(rcx.T) {
+				} else if ric {
+					if isUntyped(rcx.T) {
+						// Left not, Right untyped const ----------------
 						if isShift {
 							if baseOf(rt) != UintType {
 								// convert n.Right to (gno) uint type.
-								convertIfConst(last, n.Right, UintType)
+								checkOrConvertType(last, n.Right, UintType)
 							} else {
 								// leave n.Left as is and baseOf(n.Right) as UintType.
 							}
 						} else {
-							lt := evalTypeOf(last, n.Left)
 							if lnt, ok := lt.(*nativeType); ok {
 								// get concrete native base type.
 								pt := go2GnoBaseType(lnt.Type).(PrimitiveType)
 								// convert n.Left to (gno) pt type,
 								ln := Expr(Call(pt.String(), n.Left))
 								// convert n.Right to pt type,
-								convertIfConst(last, n.Right, pt)
+								checkOrConvertType(last, n.Right, pt)
 								// and convert result back.
 								tx := &constTypeExpr{
 									Source: n,
@@ -463,79 +598,65 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 								// gno, never with reflect.
 							} else {
 								// convert n.Right to left type.
-								convertIfConst(last, n.Right, lt)
+								checkOrConvertType(last, n.Right, lt)
 							}
 						}
-					} else {
-						lt := evalTypeOf(last, n.Left)
+					} else if rcx.T == nil {
+						// convert n.Right to typed-nil type.
+						checkOrConvertType(last, n.Right, lt)
+					}
+				} else {
+					// Left not const, Right not const ------------------
+					if n.Op == EQL || n.Op == NEQ {
+						// If == or !=, no conversions.
+					} else if lnt, ok := lt.(*nativeType); ok {
 						if debug {
 							if !isShift {
-								assertTypes(lt, rt)
+								assertSameTypes(lt, rt)
 							}
 						}
-						if lnt, ok := lt.(*nativeType); ok {
-							// get concrete native base type.
-							pt := go2GnoBaseType(lnt.Type).(PrimitiveType)
-							// convert n.Left to (gno) pt type,
-							ln := Expr(Call(pt.String(), n.Left))
-							// convert n.Right to pt or uint type,
-							rn := n.Right
-							if isShift {
-								if baseOf(rt) != UintType {
-									rn = Expr(Call("uint", n.Right))
-								}
-							} else {
-								rn = Expr(Call(pt.String(), n.Right))
+						// If left and right are native type,
+						// convert left and right to gno, then
+						// convert result back to native.
+						//
+						// get concrete native base type.
+						pt := go2GnoBaseType(lnt.Type).(PrimitiveType)
+						// convert n.Left to (gno) pt type,
+						ln := Expr(Call(pt.String(), n.Left))
+						// convert n.Right to pt or uint type,
+						rn := n.Right
+						if isShift {
+							if baseOf(rt) != UintType {
+								rn = Expr(Call("uint", n.Right))
 							}
-							// and convert result back.
-							tx := &constTypeExpr{
-								Source: n,
-								Type:   lnt,
-							}
-							// reset/create n2 to preprocess children.
-							n2 := &BinaryExpr{
-								Left:  ln,
-								Op:    n.Op,
-								Right: rn,
-							}
-							resn := Node(Call(tx, n2))
-							resn = Preprocess(imp, last, resn)
-							return resn, TRANS_CONTINUE
-							// NOTE: binary operations are always computed in
-							// gno, never with reflect.
 						} else {
-							// nothing to do.
+							rn = Expr(Call(pt.String(), n.Right))
 						}
+						// and convert result back.
+						tx := &constTypeExpr{
+							Source: n,
+							Type:   lnt,
+						}
+						// reset/create n2 to preprocess
+						// children.
+						n2 := &BinaryExpr{
+							Left:  ln,
+							Op:    n.Op,
+							Right: rn,
+						}
+						resn := Node(Call(tx, n2))
+						resn = Preprocess(imp, last, resn)
+						return resn, TRANS_CONTINUE
+						// NOTE: binary operations are always
+						// computed in gno, never with
+						// reflect.
+					} else {
+						// nothing to do.
 					}
 				}
 
 			// TRANS_LEAVE -----------------------
 			case *CallExpr:
-				// Special case conversions.
-				if cx, ok := n.Func.(*constExpr); ok {
-					if nx, ok := cx.Source.(*NameExpr); ok &&
-						nx.Name == "append" {
-						st := evalTypeOf(last, n.Args[0])
-						if debug {
-							if st.Kind() != SliceKind {
-								panic(fmt.Sprintf(
-									"cannot append to non-slice kind %s",
-									st.Kind()))
-							}
-						}
-						// Replace const Args with *constExpr.
-						set := st.Elem()
-						for i := 1; i < len(n.Args); i++ {
-							arg := n.Args[i]
-							if n.Varg && i == len(n.Args)-1 {
-								convertIfConst(last, arg, nil)
-							} else {
-								convertIfConst(last, arg, set)
-							}
-						}
-						break // done with "append" special case.
-					}
-				}
 				// Func type evaluation.
 				var ft *FuncType
 				ift := evalTypeOf(last, n.Func)
@@ -548,30 +669,120 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					if len(n.Args) != 1 {
 						panic("type conversion requires single argument")
 					}
-					convertIfConst(last, n.Args[0], nil)
-					return n, TRANS_CONTINUE
+					if _, ok := n.Args[0].(*constExpr); ok {
+						convertIfConst(last, n.Args[0])
+						cv := evalConst(last, n)
+						return cv, TRANS_CONTINUE
+					} else {
+						ct := evalType(last, n.Func)
+						n.SetAttribute(ATTR_TYPEOF_VALUE, ct)
+						return n, TRANS_CONTINUE
+					}
 				default:
 					panic(fmt.Sprintf(
 						"unexpected func type %v (%v)",
 						ift, reflect.TypeOf(ift)))
 				}
-				// Replace const Args with *constExpr.
 				hasVarg := ft.HasVarg()
-				isVargX := n.Varg
-				for i, arg := range n.Args {
-					if hasVarg && (len(ft.Params)-1) <= i {
-						if isVargX {
-							if len(ft.Params) <= i {
-								panic("expected final vargs slice but got many")
-							}
-							convertIfConst(last, arg,
-								ft.Params[i].Type)
-						} else {
-							convertIfConst(last, arg,
-								ft.Params[len(ft.Params)-1].Type.Elem())
+				isVarg := n.Varg
+				embedded := false
+				argTVs := []TypedValue{}
+				minArgs := len(ft.Params)
+				if hasVarg {
+					minArgs--
+				}
+				// Check input arg count.
+				if len(n.Args) < minArgs && !isVarg &&
+					len(n.Args) == 1 {
+					pcx, ok := n.Args[0].(*CallExpr)
+					if !ok {
+						panic(fmt.Sprintf(
+							"wrong argument count in call to %s; want %d got %d and not a call expression",
+							n.Func.String(),
+							len(ft.Params),
+							len(n.Args)))
+					}
+					// special case of x(f()) form:
+					// use the number of results instead.
+					pcxift := evalTypeOf(last, pcx.Func) // pcx (ifce) func type
+					pcxft := getGnoFuncTypeOf(pcxift)
+					embedded = true
+					argTVs = getResultTypedValues(pcx)
+					if !hasVarg {
+						if len(pcxft.Results) != len(ft.Params) {
+							panic(fmt.Sprintf(
+								"wrong argument count in call to %s; want %d got %d (with embedded call expr as arg)",
+								n.Func.String(),
+								len(ft.Params),
+								len(pcxft.Results),
+							))
 						}
-					} else {
-						convertIfConst(last, arg, ft.Params[i].Type)
+					} else if hasVarg && !isVarg {
+						if len(pcxft.Results) < len(ft.Params)-1 {
+							panic(fmt.Sprintf(
+								"not enough arguments in call to %s; want %d (besides variadic) got %d (with embedded call expr as arg)",
+								n.Func.String(),
+								len(ft.Params)-1,
+								len(pcxft.Results)))
+						}
+					}
+				} else if !hasVarg {
+					argTVs = evalTypedValues(last, n.Args...)
+					if len(n.Args) != len(ft.Params) {
+						panic(fmt.Sprintf(
+							"wrong argument count in call to %s; want %d got %d",
+							n.Func.String(),
+							len(ft.Params),
+							len(n.Args),
+						))
+					}
+				} else if hasVarg && !isVarg {
+					argTVs = evalTypedValues(last, n.Args...)
+					if len(n.Args) < len(ft.Params)-1 {
+						panic(fmt.Sprintf(
+							"not enough arguments in call to %s; want %d (besides variadic) got %d",
+							n.Func.String(),
+							len(ft.Params)-1,
+							len(n.Args)))
+					}
+				} else if hasVarg && isVarg {
+					argTVs = evalTypedValues(last, n.Args...)
+					if len(n.Args) != len(ft.Params) {
+						panic(fmt.Sprintf(
+							"not enough arguments in call to %s; want %d (including variadic) got %d",
+							n.Func.String(),
+							len(ft.Params),
+							len(n.Args)))
+					}
+				} else {
+					panic("should not happen")
+				}
+				// Specify function param/result generics.
+				sft := ft.Specify(argTVs, isVarg)
+				spts := sft.Params
+				srts := FieldTypeList(sft.Results).Types()
+				n.SetAttribute(ATTR_TYPEOF_VALUE,
+					&tupleType{Elts: srts})
+				// Replace const Args with *constExpr.
+				if !embedded {
+					for i, arg := range n.Args {
+						if hasVarg {
+							if (len(spts) - 1) <= i {
+								if isVarg {
+									if len(spts) <= i {
+										panic("expected final vargs slice but got many")
+									}
+									checkOrConvertType(last, arg, spts[i].Type)
+								} else {
+									checkOrConvertType(last, arg,
+										spts[len(spts)-1].Type.Elem())
+								}
+							} else {
+								checkOrConvertType(last, arg, spts[i].Type)
+							}
+						} else {
+							checkOrConvertType(last, arg, spts[i].Type)
+						}
 					}
 				}
 				// TODO in the future, pure results
@@ -580,13 +791,13 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 			case *IndexExpr:
 				xt := evalTypeOf(last, n.X)
 				switch xt.Kind() {
-				case ArrayKind:
-					convertIfConst(last, n.Index, IntType)
-				case SliceKind:
-					convertIfConst(last, n.Index, IntType)
+				case StringKind, ArrayKind, SliceKind:
+					// Replace const index with int *constExpr,
+					// or if not const, assert integer type..
+					checkOrConvertIntegerType(last, n.Index)
 				case MapKind:
 					mt := baseOf(gnoTypeOf(xt)).(*MapType)
-					convertIfConst(last, n.Index, mt.Key)
+					checkOrConvertType(last, n.Index, mt.Key)
 				default:
 					panic(fmt.Sprintf(
 						"unexpected index base kind for type %s",
@@ -596,27 +807,20 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 
 			// TRANS_LEAVE -----------------------
 			case *SliceExpr:
-				// Replace const L/H/M with int *constExpr.
-				convertIfConst(last, n.Low, IntType)
-				convertIfConst(last, n.High, IntType)
-				convertIfConst(last, n.Max, IntType)
+				// Replace const L/H/M with int *constExpr,
+				// or if not const, assert integer type..
+				checkOrConvertIntegerType(last, n.Low)
+				checkOrConvertIntegerType(last, n.High)
+				checkOrConvertIntegerType(last, n.Max)
 
 			// TRANS_LEAVE -----------------------
 			case *TypeAssertExpr:
-				n.Type = evalConst(last, n.Type)
-				if ftype == TRANS_ASSIGN_RHS {
-					as := ns[len(ns)-1].(*AssignStmt)
-					if len(as.Lhs) == 1 {
-						n.HasOK = false
-					} else if len(as.Lhs) == 2 {
-						n.HasOK = true
-					} else {
-						panic(fmt.Sprintf(
-							"type assert assignment takes 1 or 2 lhs operands, got %v",
-							len(as.Lhs),
-						))
-					}
+				if n.Type == nil {
+					panic("should not happen")
 				}
+				// ExprStmt of form `x.(<type>)`,
+				// or special case form `c, ok := x.(<type>)`.
+				n.Type = evalConst(last, n.Type)
 
 			// TRANS_LEAVE -----------------------
 			case *UnaryExpr:
@@ -661,29 +865,28 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 							key := n.Elts[i].Key.(*NameExpr).Name
 							path := cclt.GetPathForName(key)
 							ft := cclt.GetStaticTypeOfAt(path)
-							convertIfConst(last, n.Elts[i].Value, ft)
+							checkOrConvertType(last, n.Elts[i].Value, ft)
 						}
 					} else {
 						for i := 0; i < len(n.Elts); i++ {
-							flat := cclt.Mapping[i]
-							ft := cclt.Fields[flat].Type
-							convertIfConst(last, n.Elts[i].Value, ft)
+							ft := cclt.Fields[i].Type
+							checkOrConvertType(last, n.Elts[i].Value, ft)
 						}
 					}
 				case *ArrayType:
 					for i := 0; i < len(n.Elts); i++ {
-						convertIfConst(last, n.Elts[i].Key, IntType)
-						convertIfConst(last, n.Elts[i].Value, cclt.Elt)
+						checkOrConvertType(last, n.Elts[i].Key, IntType)
+						checkOrConvertType(last, n.Elts[i].Value, cclt.Elt)
 					}
 				case *SliceType:
 					for i := 0; i < len(n.Elts); i++ {
-						convertIfConst(last, n.Elts[i].Key, IntType)
-						convertIfConst(last, n.Elts[i].Value, cclt.Elt)
+						checkOrConvertType(last, n.Elts[i].Key, IntType)
+						checkOrConvertType(last, n.Elts[i].Value, cclt.Elt)
 					}
 				case *MapType:
 					for i := 0; i < len(n.Elts); i++ {
-						convertIfConst(last, n.Elts[i].Key, cclt.Key)
-						convertIfConst(last, n.Elts[i].Value, cclt.Value)
+						checkOrConvertType(last, n.Elts[i].Key, cclt.Key)
+						checkOrConvertType(last, n.Elts[i].Value, cclt.Value)
 					}
 				case *nativeType:
 					clt = cclt.GnoType()
@@ -728,70 +931,82 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 			// TRANS_LEAVE -----------------------
 			case *SelectorExpr:
 				xt := evalTypeOf(last, n.X)
-				if pt, ok := xt.(PointerType); ok {
-					if dt, ok := pt.Elt.(*DeclaredType); ok {
-						mthd := dt.GetMethod(n.Sel)
-						if mthd == nil {
-							// Go spec: "if the type of x is a
-							// defined pointer type and (*x).f is a
-							// valid selector expression denoting a
-							// field (but not a method), x.f is
-							// shorthand for (*x).f."
-						} else {
-							if _, ok := mthd.Type.Params[0].Type.(PointerType); ok {
-								xt = xt.Elem()
-								goto SEL_TYPE_SWITCH
-							} else {
-								// Go spec: "As with selectors,
-								// a reference to a
-								// non-interface method with a
-								// value receiver using a
-								// pointer will automatically
-								// dereference that pointer:
-								// pt.Mv is equivalent to
-								// (*pt).Mv."
+
+				// Set selector path based on xt's type.
+				switch cxt := xt.(type) {
+				case *PointerType, *DeclaredType, *StructType, *InterfaceType:
+					tr, _, rcvr, _ := findEmbeddedFieldType(cxt, n.Sel)
+					if tr == nil {
+						panic(fmt.Sprintf("missing field %s in %s", n.Sel,
+							cxt.String()))
+					}
+					if len(tr) > 1 {
+						// (the last vp, tr[len(tr)-1], is for n.Sel)
+						if debug {
+							if tr[len(tr)-1].Name != n.Sel {
+								panic("should not happen")
 							}
 						}
-					}
-					// convert to (*x).f.
-					n.X = &StarExpr{X: n.X}
-					n.X.SetAttribute(ATTR_PREPROCESSED, true)
-					xt = xt.Elem()
-				} else if dt, ok := xt.(*DeclaredType); ok {
-					mthd := dt.GetMethod(n.Sel)
-					if mthd != nil {
-						if _, ok := mthd.Type.Params[0].Type.(PointerType); ok {
-							// Go spec: "If x is addressable
-							// and &x's method set contains
-							// m, x.m() is shorthand for
-							// (&x).m()"
-							// Go spec: "As with method
-							// calls, a reference to a
-							// non-interface method with a
-							// pointer receiver using an
-							// addressable value will
-							// automatically take the
-							// address of that value: t.Mp
-							// is equivalent to (&t).Mp."
-						} else {
-							goto SEL_TYPE_SWITCH
+						// replace n.X w/ tr[:len-1] selectors applied.
+						nx2 := n.X
+						for _, vp := range tr[:len(tr)-1] {
+							nx2 = &SelectorExpr{
+								X:    nx2,
+								Path: vp,
+								Sel:  vp.Name,
+							}
 						}
-						// convert to (&x).m.
+						// recursively preprocess new n.X.
+						n.X = Preprocess(imp, last, nx2).(Expr)
+					}
+					// nxt2 may not be xt anymore.
+					// (even the dereferenced of xt and nxt2 may not
+					// be the same, with embedded fields)
+					nxt2 := evalTypeOf(last, n.X)
+					// If receiver is pointer type but n.X is not:
+					if rcvr != nil &&
+						rcvr.Kind() == PointerKind &&
+						nxt2.Kind() != PointerKind {
+						// Go spec: "If x is addressable and &x's
+						// method set contains m, x.m() is shorthand
+						// for (&x).m()"
+						// Go spec: "As with method calls, a reference
+						// to a non-interface method with a pointer
+						// receiver using an addressable value will
+						// automatically take the address of that
+						// value: t.Mp is equivalent to (&t).Mp."
+						//
+						// convert to (&x).m, but leave xt as is.
+						n.X = &RefExpr{X: n.X}
+						n.X.SetAttribute(ATTR_PREPROCESSED, true)
+						if debug {
+							if len(tr) != 1 {
+								panic(fmt.Sprintf(
+									"expected trail of length 1 but got %v",
+									tr))
+							}
+						}
+						switch tr[len(tr)-1].Type {
+						case VPPtrMethod:
+							tr[len(tr)-1].Type = VPDerefPtrMethod
+						default:
+							panic(fmt.Sprintf(
+								"expected ultimate VPPtrMethod but got %v",
+								tr[len(tr)-1].Type,
+							))
+						}
+					} else if len(tr) > 0 &&
+						tr[len(tr)-1].IsDerefType() &&
+						nxt2.Kind() != PointerKind {
+						// If tr[0] is deref type, but xt is not pointer type,
+						// replace n.X with &RefExpr{X: n.X}.
 						n.X = &RefExpr{X: n.X}
 						n.X.SetAttribute(ATTR_PREPROCESSED, true)
 					}
-				}
-			SEL_TYPE_SWITCH:
-				// Set selector path.
-				switch xt := xt.(type) {
-				case *DeclaredType:
 					// bound method or underlying.
 					// TODO check for unexported fields.
-					n.Path = xt.GetPathForName(n.Sel)
-				case *StructType:
-					// struct field
-					// TODO check for unexported fields.
-					n.Path = xt.GetPathForName(n.Sel)
+					n.Path = tr[len(tr)-1]
+					// n.Path = cxt.GetPathForName(n.Sel)
 				case *PackageType:
 					// packages can only be referred to by
 					// *NameExprs, and cannot be copied.
@@ -799,39 +1014,37 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					pv := last.GetValueRef(nx.Name)
 					pn := pv.V.(*PackageValue).Source
 					n.Path = pn.GetPathForName(n.Sel)
-				case *InterfaceType:
-					// first implement interfaaces
-					// TODO check for unexported fields.
-					panic("not yet implemented")
 				case *TypeType:
 					// unbound method
-					xv := evalType(last, n.X)
-					switch xv := xv.(type) {
+					xt := evalType(last, n.X)
+					switch ct := xt.(type) {
+					case *PointerType:
+						dt := ct.Elt.(*DeclaredType)
+						n.Path = dt.GetUnboundPathForName(n.Sel)
 					case *DeclaredType:
-						n.Path = xv.GetPathForName(n.Sel)
-						if n.Path.Depth > 1 {
-							panic(fmt.Sprintf(
-								"DeclaredType has no method %s",
-								n.Sel))
-						}
+						n.Path = ct.GetUnboundPathForName(n.Sel)
 					default:
 						panic(fmt.Sprintf(
 							"unexpected selector expression type value %s",
-							xv.String()))
+							xt.String()))
 					}
 				case *nativeType:
+					// NOTE: if type of n.X is native type, as in a native
+					// interface method, n.Path may be VPNative but at
+					// runtime, the value's type may be *gno.PointerType.
+					//
 					// native types don't use path indices.
-					n.Path = NewValuePath(n.Sel, 0, 0)
+					n.Path = NewValuePathNative(n.Sel)
 				default:
 					panic(fmt.Sprintf(
-						"unexpected selector expression type %s",
-						xt.String()))
+						"unexpected selector expression type %v",
+						reflect.TypeOf(xt)))
 				}
 
 			// TRANS_LEAVE -----------------------
 			case *FieldTypeExpr:
 				// Replace const Tag with default *constExpr.
-				convertIfConst(last, n.Tag, nil)
+				convertIfConst(last, n.Tag)
 
 			// TRANS_LEAVE -----------------------
 			case *ArrayTypeExpr:
@@ -839,8 +1052,9 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					// Calculate length at *CompositeLitExpr:LEAVE
 				} else {
 					// Replace const Len with int *constExpr.
-					evalConst(last, n.Len)
-					convertIfConst(last, n.Len, IntType)
+					cx := evalConst(last, n.Len)
+					convertConst(last, cx, IntType)
+					n.Len = cx
 				}
 				// TODO *constTypeExpr?
 				evalType(last, n)
@@ -877,114 +1091,208 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 
 			// TRANS_LEAVE -----------------------
 			case *AssignStmt:
-				// Rhs consts become default *constExprs.
-				for _, rx := range n.Rhs {
-					// NOTE: does nothing if rx is "nil".
-					convertIfConst(last, rx, nil)
-				}
-				// Handle any definitions/assignments.
+				// NOTE: keep DEFINE and ASSIGN in sync.
 				if n.Op == DEFINE {
+					// Rhs consts become default *constExprs.
+					for _, rx := range n.Rhs {
+						// NOTE: does nothing if rx is "nil".
+						convertIfConst(last, rx)
+					}
 					if len(n.Lhs) > len(n.Rhs) {
 						// Unpack n.Rhs[0] to n.Lhs[:]
 						if len(n.Rhs) != 1 {
 							panic("should not happen")
 						}
-						cx, ok := n.Rhs[0].(*CallExpr)
-						if !ok {
+						switch cx := n.Rhs[0].(type) {
+						case *CallExpr:
+							// Call case: a, b := x(...)
+							ift := evalTypeOf(last, cx.Func)
+							cft := getGnoFuncTypeOf(ift)
+							if len(n.Lhs) != len(cft.Results) {
+								panic(fmt.Sprintf(
+									"assignment mismatch: "+
+										"%d variables but %s returns %d values",
+									len(n.Lhs), cx.Func.String(), len(cft.Results)))
+							}
+							for i, lx := range n.Lhs {
+								ln := lx.(*NameExpr).Name
+								rf := cft.Results[i]
+								// re-definition
+								last.Define(ln, anyValue(rf.Type))
+							}
+						case *TypeAssertExpr:
+							// Type-assert case: a, ok := x.(type)
+							if len(n.Lhs) != 2 {
+								panic("should not happen")
+							}
+							cx.HasOK = true
+							lhs0 := n.Lhs[0].(*NameExpr).Name
+							lhs1 := n.Lhs[1].(*NameExpr).Name
+							tt := evalType(last, cx.Type)
+							// re-definitions
+							last.Define(lhs0, anyValue(tt))
+							last.Define(lhs1, anyValue(BoolType))
+						case *IndexExpr:
+							// Index case: v, ok := x[k], x is map.
+							if len(n.Lhs) != 2 {
+								panic("should not happen")
+							}
+							cx.HasOK = true
+							lhs0 := n.Lhs[0].(*NameExpr).Name
+							lhs1 := n.Lhs[1].(*NameExpr).Name
+							mt := evalTypeOf(last, cx.X).(*MapType)
+							// re-definitions
+							last.Define(lhs0, anyValue(mt.Value))
+							last.Define(lhs1, anyValue(BoolType))
+						default:
 							panic("should not happen")
 						}
-						ft := gnoTypeOf(evalTypeOf(last, cx.Func)).(*FuncType)
-						if len(n.Lhs) != len(ft.Results) {
-							panic(fmt.Sprintf(
-								"assignment mismatch: "+
-									"%d variables but %s returns %d values",
-								len(n.Lhs), cx.Func.String(), len(ft.Results)))
-						}
-						for i, lx := range n.Lhs {
-							ln := lx.(*NameExpr).Name
-							rt := ft.Results[i]
-							// re-definition
-							last.Define(ln, anyValue(rt))
-						}
 					} else {
+						// General case: a, b := x, y
 						for i, lx := range n.Lhs {
 							ln := lx.(*NameExpr).Name
 							rx := n.Rhs[i]
 							rt := evalTypeOf(last, rx)
 							// re-definition
-							last.Define(ln, anyValue(rt))
+							if rt == nil {
+								// e.g. (interface{})(nil), becomes constExpr(undefined).
+								// last.Define(ln, undefined) complains, since redefinition.
+							} else {
+								last.Define(ln, anyValue(rt))
+							}
 						}
 					}
-				} else {
+				} else { // ASSIGN.
+					// NOTE: Keep in sync with DEFINE above.
 					if len(n.Lhs) > len(n.Rhs) {
 						// TODO dry code w/ above.
 						// Unpack n.Rhs[0] to n.Lhs[:]
 						if len(n.Rhs) != 1 {
 							panic("should not happen")
 						}
-						cx, ok := n.Rhs[0].(*CallExpr)
-						if !ok {
+						switch cx := n.Rhs[0].(type) {
+						case *CallExpr:
+							// Call case: a, b = x(...)
+							ift := evalTypeOf(last, cx.Func)
+							cft := getGnoFuncTypeOf(ift)
+							if len(n.Lhs) != len(cft.Results) {
+								panic(fmt.Sprintf(
+									"assignment mismatch: "+
+										"%d variables but %s returns %d values",
+									len(n.Lhs), cx.Func.String(), len(cft.Results)))
+							}
+						case *TypeAssertExpr:
+							// Type-assert case: a, ok := x.(type)
+							if len(n.Lhs) != 2 {
+								panic("should not happen")
+							}
+							cx.HasOK = true
+						case *IndexExpr:
+							// Index case: v, ok := x[k], x is map.
+							if len(n.Lhs) != 2 {
+								panic("should not happen")
+							}
+							cx.HasOK = true
+						default:
 							panic("should not happen")
 						}
-						ft := gnoTypeOf(evalTypeOf(last, cx.Func)).(*FuncType)
-						if len(n.Lhs) != len(ft.Results) {
-							panic(fmt.Sprintf(
-								"assignment mismatch: "+
-									"%d variables but %s returns %d values",
-								len(n.Lhs), cx.Func.String(), len(ft.Results)))
-						}
-						// No conversion to do.
 					} else {
+						// General case: a, b = x, y.
 						for i, lx := range n.Lhs {
 							lt := evalTypeOf(last, lx)
 							rx := n.Rhs[i]
 							// converts if rx is "nil".
-							convertIfConst(last, rx, lt)
+							checkOrConvertType(last, rx, lt)
 						}
 					}
+				}
+
+			// TRANS_LEAVE -----------------------
+			case *BranchStmt:
+				switch n.Op {
+				case BREAK:
+				case CONTINUE:
+				case GOTO:
+					_, depth, index := findLabel(last, n.Label)
+					n.Depth = depth
+					n.BodyIndex = index
+				case FALLTHROUGH:
+				default:
+					panic("should not happen")
 				}
 
 			// TRANS_LEAVE -----------------------
 			case *ForStmt:
 				// Cond consts become bool *constExprs.
-				convertIfConst(last, n.Cond, BoolType)
+				checkOrConvertType(last, n.Cond, BoolType)
 
 			// TRANS_LEAVE -----------------------
 			case *IfStmt:
 				// Cond consts become bool *constExprs.
-				convertIfConst(last, n.Cond, BoolType)
+				checkOrConvertType(last, n.Cond, BoolType)
 
 			// TRANS_LEAVE -----------------------
 			case *RangeStmt:
-				// key value if define.
-				if n.Op == DEFINE {
-					if n.Key != nil {
-						// already defined @TRANS_BLOCK.
-					}
-					if n.Value != nil {
-						vn := n.Value.(*NameExpr).Name
-						pb := last.GetParent()
-						xt := evalTypeOf(pb, n.X)
-						et := xt.Elem()
-						// re-definition.
-						last.Define(vn, anyValue(et))
-					}
-				}
+				// NOTE: k,v already defined @ TRANS_BLOCK.
 
 			// TRANS_LEAVE -----------------------
 			case *ReturnStmt:
 				fnode, ft := funcNodeOf(last)
-				// Results consts become default *constExprs.
-				for i, rx := range n.Results {
-					rtx := ft.Results[i].Type
-					rt := evalType(fnode.GetParent(), rtx)
-					convertIfConst(last, rx, rt)
+				// Check number of return arguments.
+				if len(n.Results) != len(ft.Results) {
+					if len(n.Results) == 0 {
+						if ft.Results.IsNamed() {
+							// ok, results already named.
+						} else {
+							panic(fmt.Sprintf("expected %d return values; got %d",
+								len(ft.Results),
+								len(n.Results),
+							))
+						}
+					} else if len(n.Results) == 1 {
+						if cx, ok := n.Results[0].(*CallExpr); ok {
+							ift := evalTypeOf(last, cx.Func)
+							cft := getGnoFuncTypeOf(ift)
+							if len(cft.Results) != len(ft.Results) {
+								panic(fmt.Sprintf("expected %d return values; got %d",
+									len(ft.Results),
+									len(cft.Results),
+								))
+							} else {
+								// nothing more to do.
+							}
+						} else {
+							panic(fmt.Sprintf("expected %d return values; got %d",
+								len(ft.Results),
+								len(n.Results),
+							))
+						}
+					} else {
+						panic(fmt.Sprintf("expected %d return values; got %d",
+							len(ft.Results),
+							len(n.Results),
+						))
+					}
+				} else {
+					// Results consts become default *constExprs.
+					for i, rx := range n.Results {
+						rtx := ft.Results[i].Type
+						rt := evalType(fnode.GetParent(), rtx)
+						if isGeneric(rt) {
+							// cannot convert generic result,
+							// the result type depends.
+							// XXX how to deal?
+							panic("not yet implemented")
+						} else {
+							checkOrConvertType(last, rx, rt)
+						}
+					}
 				}
 
 			// TRANS_LEAVE -----------------------
 			case *SendStmt:
 				// Value consts become default *constExprs.
-				convertIfConst(last, n.Value, nil)
+				checkOrConvertType(last, n.Value, nil)
 
 			// TRANS_LEAVE -----------------------
 			case *SelectCaseStmt:
@@ -997,7 +1305,8 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 			case *ValueDecl:
 				// evaluate value if const expr.
 				if n.Const {
-					// not necessarily a *constExpr (yet).
+					// NOTE: may or may not be a *constExpr,
+					// but if not, make one now.
 					n.Value = evalConst(last, n.Value)
 				} else {
 					// value may already be *constExpr, but
@@ -1010,10 +1319,14 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 				// convert and evaluate type.
 				var t Type
 				if n.Type != nil {
+					// convert if const to type t.
 					t = evalType(last, n.Type)
-					convertIfConst(last, n.Value, t)
+					checkOrConvertType(last, n.Value, t)
+				} else if n.Const {
+					// leave n.Value as is.
 				} else {
-					convertIfConst(last, n.Value, nil)
+					// convert n.Value to default type.
+					convertIfConst(last, n.Value)
 					t = evalTypeOf(last, n.Value)
 				}
 				// evaluate typed value for static definition.
@@ -1026,58 +1339,64 @@ func Preprocess(imp Importer, ctx BlockNode, n Node) Node {
 					tv = anyValue(t)
 				}
 				// define.
-				if fn, ok := last.(*FileNode); ok {
-					pn := fn.GetParent().(*PackageNode)
-					pn.Define(n.Name, tv)
+				if n.Name == "_" {
+					n.Path = NewValuePathBlock(0, 0, "_")
 				} else {
-					last.Define(n.Name, tv)
+					if fn, ok := last.(*FileNode); ok {
+						pn := fn.GetParent().(*PackageNode)
+						pn.Define(n.Name, tv)
+					} else {
+						last.Define(n.Name, tv)
+					}
+					n.Path = last.GetPathForName(n.Name)
 				}
-				n.Path = last.GetPathForName(n.Name)
 				// TODO make note of constance in static block for future
 				// use, or consider "const paths".
 				// set as preprocessed.
 
 			// TRANS_LEAVE -----------------------
 			case *TypeDecl:
-				// Construct new Type, where any recursive references
-				// refer to the old Type declared during
-				// *TypeDecl:ENTER.  Then, copy over the values,
-				// completing the recursion.
-				temp := evalType(last, n.Type)
-				tipe := last.GetValueRef(n.Name).GetType()
-				switch oldt := tipe.(type) {
+				// Construct new Type, where any recursive
+				// references refer to the old Type declared
+				// during *TypeDecl:ENTER.  Then, copy over the
+				// values, completing the recursion.
+				tmp := evalType(last, n.Type)
+				dst := last.GetValueRef(n.Name).GetType()
+				switch dst := dst.(type) {
 				case *FuncType:
-					*oldt = *(temp.(*FuncType))
+					*dst = *(tmp.(*FuncType))
 				case *ArrayType:
-					*oldt = *(temp.(*ArrayType))
+					*dst = *(tmp.(*ArrayType))
 				case *SliceType:
-					*oldt = *(temp.(*SliceType))
+					*dst = *(tmp.(*SliceType))
 				case *InterfaceType:
-					*oldt = *(temp.(*InterfaceType))
+					*dst = *(tmp.(*InterfaceType))
 				case *ChanType:
-					*oldt = *(temp.(*ChanType))
+					*dst = *(tmp.(*ChanType))
 				case *MapType:
-					*oldt = *(temp.(*MapType))
+					*dst = *(tmp.(*MapType))
 				case *StructType:
-					*oldt = *(temp.(*StructType))
+					*dst = *(tmp.(*StructType))
 				case *DeclaredType:
 					pn := packageOf(last)
-					// XXX this is wrong,
-					// this makes static type and runtime
-					// type be different somehow.
-					// this makes a differnt one
-					dt := declareWith(pn.PkgPath, n.Name, temp)
-					*oldt = *dt
+					// NOTE: this is where declared types are
+					// actually instantiated, not in
+					// interpret.go:runDeclaration().
+					dt := declareWith(pn.PkgPath, n.Name, tmp)
+					if !n.IsAlias {
+						dt.Seal()
+					}
+					*dst = *dt
 				default:
 					panic(fmt.Sprintf("unexpected type declaration type %v",
-						reflect.TypeOf(tipe)))
+						reflect.TypeOf(dst)))
 				}
 				// We need to replace all references of the new
 				// Type with old Type, including in attributes.
-				n.Type.SetAttribute(ATTR_TYPE_VALUE, tipe)
+				n.Type.SetAttribute(ATTR_TYPE_VALUE, dst)
 				// Replace the type with *constTypeExpr{},
 				// otherwise methods would be un at runtime.
-				n.Type = constType(n.Type, tipe)
+				n.Type = constType(n.Type, dst)
 			}
 			// end type switch statement
 
@@ -1106,6 +1425,14 @@ func pushBlock(bn BlockNode, last *BlockNode, stack *[]BlockNode) {
 	*stack = append(*stack, bn)
 }
 
+// like pushBlock(), but when the last block is a faux block,
+// namely after SwitchStmt and IfStmt.
+func pushRealBlock(bn BlockNode, last *BlockNode, stack *[]BlockNode) {
+	bn.InitStaticBlock(bn, (*last).GetParent())
+	*last = bn
+	*stack = append(*stack, bn)
+}
+
 // Evaluates the value of x which is expected to be a typeval.
 // Caches the result as an attribute of x.
 // To discourage mis-use, expects x to already be
@@ -1123,18 +1450,8 @@ func evalType(last BlockNode, x Expr) Type {
 	return t
 }
 
-// If t is a native type, returns the gno type.
-func gnoTypeOf(t Type) Type {
-	if nt, ok := t.(*nativeType); ok {
-		return nt.GnoType()
-	} else {
-		return t
-	}
-}
-
 // If it is known that the type was already evaluated,
 // use this function instead of evalType().
-// TODO not used.
 func getType(x Expr) Type {
 	if t, ok := x.GetAttribute(ATTR_TYPE_VALUE).(Type); ok {
 		return t
@@ -1146,9 +1463,35 @@ func getType(x Expr) Type {
 	}
 }
 
+// If t is a native type, returns the gno type.
+func gnoTypeOf(t Type) Type {
+	if nt, ok := t.(*nativeType); ok {
+		return nt.GnoType()
+	} else {
+		return t
+	}
+}
+
 // Unlike evalType, x is not expected to be a typeval,
 // but rather computes the type OF x.
 func evalTypeOf(last BlockNode, x Expr) Type {
+	t := evalTypeOfRaw(last, x)
+	if tt, ok := t.(*tupleType); ok {
+		if len(tt.Elts) != 1 {
+			panic(fmt.Sprintf(
+				"evalTypeOf() only supports *CallExpr with 1 result, got %s",
+				tt.String(),
+			))
+		} else {
+			return tt.Elts[0]
+		}
+	} else {
+		return t
+	}
+}
+
+// like evalTypeOf() but returns the raw *tupleType for *CallExpr.
+func evalTypeOfRaw(last BlockNode, x Expr) (t Type) {
 	if t, ok := x.GetAttribute(ATTR_TYPEOF_VALUE).(Type); ok {
 		return t
 	} else if _, ok := x.(*constTypeExpr); ok {
@@ -1163,15 +1506,91 @@ func evalTypeOf(last BlockNode, x Expr) Type {
 	}
 }
 
-// Evaluate constant expressions.  Assumes all operands
-// are already defined.  No type conversion is done by
-// the machine except as required by the expression (but
-// otherwise the context is not considered).  For
-// example, untyped bigint types remain as untyped bigint
-// types after evaluation.  Conversion happens in a
-// separate step while leaving composite exprs/nodes that
-// contain constant expression nodes (e.g. const exprs in
-// the rhs of AssignStmts).
+// If it is known that the type was already evaluated,
+// use this function instead of evalTypeOf().
+func getTypeOf(x Expr) Type {
+	if t, ok := x.GetAttribute(ATTR_TYPEOF_VALUE).(Type); ok {
+		if tt, ok := t.(*tupleType); ok {
+			if len(tt.Elts) != 1 {
+				panic(fmt.Sprintf(
+					"getTypeOf() only supports *CallExpr with 1 result, got %s",
+					tt.String(),
+				))
+			} else {
+				return tt.Elts[0]
+			}
+		} else {
+			return t
+		}
+	} else {
+		panic(fmt.Sprintf(
+			"getTypeOf() called on expr not yet evaluated with evalTypeOf(): %s",
+			x.String(),
+		))
+	}
+}
+
+// like evalTypeOf() but for list of exprs, and the result
+// includes the value if type is TypeKind.
+func evalTypedValues(last BlockNode, xs ...Expr) []TypedValue {
+	res := make([]TypedValue, len(xs))
+	for i, x := range xs {
+		t := evalTypeOf(last, x)
+		if t != nil && t.Kind() == TypeKind {
+			v := evalType(last, x)
+			res[i] = TypedValue{
+				T: t,
+				V: TypeValue{Type: v},
+			}
+		} else {
+			res[i] = TypedValue{
+				T: t,
+				V: nil,
+			}
+		}
+	}
+	return res
+}
+
+func getGnoFuncTypeOf(it Type) *FuncType {
+	bt := baseOf(it)
+	ft := gnoTypeOf(bt).(*FuncType)
+	return ft
+}
+
+func getResultTypedValues(cx *CallExpr) []TypedValue {
+	if t, ok := cx.GetAttribute(ATTR_TYPEOF_VALUE).(Type); ok {
+		if tt, ok := t.(*tupleType); ok {
+			res := make([]TypedValue, len(tt.Elts))
+			for i, tte := range tt.Elts {
+				res[i] = anyValue(tte)
+			}
+			return res
+		} else {
+			panic(fmt.Sprintf(
+				"expected *tupleType of *CallExpr but got %v",
+				reflect.TypeOf(t)))
+		}
+	} else {
+		panic(fmt.Sprintf(
+			"getResultTypedValues() called on call expr not yet evaluated: %s",
+			cx.String(),
+		))
+	}
+}
+
+// Evaluate constant expressions.  Assumes all operands are
+// already defined consts; the machine doesn't know whether a
+// value is const or not, so this function always returns a
+// *constExpr, even if the operands aren't actually consts in the
+// code.
+//
+// No type conversion is done by the machine except as required by
+// the expression (but otherwise the context is not considered).
+// For example, untyped bigint types remain as untyped bigint
+// types after evaluation.  Conversion happens in a separate step
+// while leaving composite exprs/nodes that contain constant
+// expression nodes (e.g. const exprs in the rhs of AssignStmts).
 func evalConst(last BlockNode, x Expr) *constExpr {
 	// TODO: some check or verification for ensuring x
 	// is constant?  From the machine?
@@ -1182,7 +1601,19 @@ func evalConst(last BlockNode, x Expr) *constExpr {
 		TypedValue: cv,
 	}
 	cx.SetAttribute(ATTR_PREPROCESSED, true)
+	setConstAttrs(cx)
 	return cx
+}
+
+func setConstAttrs(cx *constExpr) {
+	cv := &cx.TypedValue
+	cx.SetAttribute(ATTR_TYPEOF_VALUE, cv.T)
+	if cv.T != nil && cv.T.Kind() == TypeKind {
+		if cv.GetType() == nil {
+			panic("should not happen")
+		}
+		cx.SetAttribute(ATTR_TYPE_VALUE, cv.GetType())
+	}
 }
 
 func packageOf(last BlockNode) *PackageNode {
@@ -1202,6 +1633,34 @@ func funcNodeOf(last BlockNode) (BlockNode, *FuncTypeExpr) {
 			return fd, &fd.Type
 		}
 		last = last.GetParent()
+	}
+}
+
+func findLabel(last BlockNode, label Name) (
+	bn BlockNode, depth uint8, bodyIdx int) {
+
+	for {
+		switch cbn := last.(type) {
+		case *IfStmt, *SwitchStmt:
+			// These are faux blocks -- shouldn't happen.
+			panic("unexpected faux blocknode")
+		case *FuncLitExpr,
+			*BlockStmt, *ForStmt, *IfCaseStmt, *RangeStmt,
+			*SelectCaseStmt, *SwitchClauseStmt, *FuncDecl,
+			*FileNode, *PackageNode:
+
+			body := cbn.GetBody()
+			_, bodyIdx = body.GetLabeledStmt(label)
+			if bodyIdx != -1 {
+				bn = cbn
+				return
+			} else {
+				last = cbn.GetParent()
+				depth += 1
+			}
+		default:
+			panic("unexpected block node")
+		}
 	}
 }
 
@@ -1233,28 +1692,254 @@ func isConst(x Expr) bool {
 	return ok
 }
 
-func convertIfConst(last BlockNode, x Expr, t Type) {
-	if x == nil {
-		return
-	}
-	if t != nil && t.Kind() == InterfaceKind {
-		t = nil // signifies to convert to default type.
-	}
+func isConstType(x Expr) bool {
+	_, ok := x.(*constTypeExpr)
+	return ok
+}
+
+// 1. convert x to t if x is *constExpr.
+// 2. otherwise, assert that x can be coerced to t.
+// NOTE: also see checkOrConvertIntegerType()
+func checkOrConvertType(last BlockNode, x Expr, t Type) {
 	if cx, ok := x.(*constExpr); ok {
-		if isUntyped(cx.T) {
-			ConvertUntypedTo(&cx.TypedValue, t)
-		} else if t != nil {
-			ConvertTo(&cx.TypedValue, t)
-		}
+		convertConst(last, cx, t)
+	} else if x != nil && t != nil {
+		xt := evalTypeOf(last, x)
+		checkType(xt, t)
 	}
 }
 
+// like checkOrConvertType(last, x, nil)
+func convertIfConst(last BlockNode, x Expr) {
+	if cx, ok := x.(*constExpr); ok {
+		convertConst(last, cx, nil)
+	}
+}
+
+func convertConst(last BlockNode, cx *constExpr, t Type) {
+	if t != nil && t.Kind() == InterfaceKind {
+		t = nil // signifies to convert to default type.
+	}
+	if isUntyped(cx.T) {
+		ConvertUntypedTo(&cx.TypedValue, t)
+		setConstAttrs(cx)
+	} else if t != nil {
+		// e.g. a named type or uint8 type to int for indexing.
+		ConvertTo(&cx.TypedValue, t)
+		setConstAttrs(cx)
+	}
+}
+
+// assert that xt can be assigned as dt (dest type).
+func checkType(xt Type, dt Type) {
+	// Special case if dt is interface kind:
+	if dt.Kind() == InterfaceKind {
+		if idt, ok := baseOf(dt).(*InterfaceType); ok {
+			if idt.IsEmptyInterface() {
+				// if dt is an empty Gno interface, any x ok.
+				return // ok
+			} else if idt.IsImplementedBy(xt) {
+				// if dt implements idt, ok.
+				return // ok
+			} else {
+				panic(fmt.Sprintf(
+					"%s does not implement %s",
+					xt.String(),
+					dt.String()))
+			}
+		} else if ndt, ok := baseOf(dt).(*nativeType); ok {
+			nidt := ndt.Type
+			if nidt.NumMethod() == 0 {
+				// if dt is an empty Go native interface, ditto.
+				return // ok
+			} else if nxt, ok := baseOf(xt).(*nativeType); ok {
+				// if xt has native base, do the naive native.
+				if nxt.Type.AssignableTo(nidt) {
+					return // ok
+				} else {
+					panic(fmt.Sprintf(
+						"cannot use %s as %s",
+						nxt.String(),
+						nidt.String()))
+				}
+			} else if pxt, ok := baseOf(xt).(*PointerType); ok {
+				nxt, ok := pxt.Elt.(*nativeType)
+				if !ok {
+					panic(fmt.Sprintf(
+						"pointer to non-native type cannot satisfy non-empty native interface; %s doesn't implmeent %s",
+						pxt.String(),
+						nidt.String()))
+				}
+				// if xt has native base, do the naive native.
+				if reflect.PtrTo(nxt.Type).AssignableTo(nidt) {
+					return // ok
+				} else {
+					panic(fmt.Sprintf(
+						"cannot use %s as %s",
+						pxt.String(),
+						nidt.String()))
+				}
+			} else {
+				panic(fmt.Sprintf(
+					"unexpected type pair: cannot use %s as %s",
+					xt.String(),
+					dt.String()))
+			}
+		} else {
+			panic("should not happen")
+		}
+	}
+	// Special case if xt or dt is *nativeType,
+	// check with converted Gno type, and base of the other.
+	if nxt, ok := xt.(*nativeType); ok {
+		xt = go2GnoType2(nxt.Type)
+		dt = baseOf(dt)
+	} else if pxt, ok := xt.(*PointerType); ok {
+		// *gonative{x} is gonative{*x}
+		if enxt, ok := pxt.Elt.(*nativeType); ok {
+			xt = &PointerType{Elt: go2GnoType2(enxt.Type)}
+			dt = baseOf(dt)
+		}
+	}
+	if nt, ok := dt.(*nativeType); ok {
+		xt = baseOf(xt)
+		dt = go2GnoType2(nt.Type)
+	} else if pt, ok := dt.(*PointerType); ok {
+		// *gonative{x} is gonative{*x}
+		if ent, ok := pt.Elt.(*nativeType); ok {
+			xt = baseOf(xt)
+			dt = &PointerType{Elt: go2GnoType2(ent.Type)}
+		}
+	}
+	// Special case of xt or dt is *DeclaredType,
+	// allow implicit conversion unless both are declared.
+	if dxt, ok := xt.(*DeclaredType); ok {
+		if ddt, ok := dt.(*DeclaredType); ok {
+			// types must match exactly.
+			if !dxt.sealed && !ddt.sealed &&
+				dxt.PkgPath == ddt.PkgPath &&
+				dxt.Name == ddt.Name { // not yet sealed
+				return // ok
+			} else if dxt.TypeID() == ddt.TypeID() {
+				return // ok
+			} else {
+				panic(fmt.Sprintf(
+					"cannot use %s as %s without explicit conversion",
+					dxt.String(),
+					ddt.String()))
+			}
+		} else {
+			// carry on with baseOf(dxt)
+			xt = dxt.Base
+		}
+	} else if ddt, ok := dt.(*DeclaredType); ok {
+		// carry on with baseOf(ddt)
+		dt = ddt.Base
+	}
+	bdt := baseOf(dt)
+	// General cases.
+	switch cxt := xt.(type) {
+	case PrimitiveType:
+		// if xt is untyped, ensure dt is compatible.
+		switch xt {
+		case UntypedBoolType:
+			switch dt.Kind() {
+			case BoolKind:
+				return // ok
+			default:
+				panic(fmt.Sprintf(
+					"cannot use untyped bool as %s",
+					dt.Kind()))
+			}
+		case UntypedStringType:
+			switch dt.Kind() {
+			case StringKind:
+				return // ok
+			default:
+				panic(fmt.Sprintf(
+					"cannot use untyped string as %s",
+					dt.Kind()))
+			}
+		case UntypedRuneType, UntypedBigintType:
+			switch dt.Kind() {
+			case IntKind, Int8Kind, Int16Kind, Int32Kind,
+				Int64Kind, UintKind, Uint8Kind, Uint16Kind,
+				Uint32Kind, Uint64Kind:
+				return // ok
+			default:
+				panic(fmt.Sprintf(
+					"cannot use untyped rune as %s",
+					dt.Kind()))
+			}
+		default:
+			if isUntyped(xt) {
+				panic("unexpected untyped type")
+			}
+			if cxt.TypeID() == bdt.TypeID() {
+				return // ok
+			}
+		}
+	case *PointerType:
+		if pt, ok := bdt.(*PointerType); ok {
+			checkType(cxt.Elt, pt.Elt)
+			return // ok
+		}
+	case *ArrayType:
+		if at, ok := bdt.(*ArrayType); ok {
+			checkType(cxt.Elt, at.Elt)
+			return // ok
+		}
+	case *SliceType:
+		if st, ok := bdt.(*SliceType); ok {
+			checkType(cxt.Elt, st.Elt)
+			return // ok
+		}
+	case *MapType:
+		if mt, ok := bdt.(*MapType); ok {
+			checkType(cxt.Key, mt.Key)
+			checkType(cxt.Value, mt.Value)
+			return // ok
+		}
+	case *FuncType:
+		if cxt.TypeID() == bdt.TypeID() {
+			return // ok
+		}
+	case *InterfaceType:
+		if cxt.Generic != "" {
+			panic(fmt.Sprintf(
+				"unexpected generic <%s>",
+				cxt.Generic))
+		} else {
+			return // ok
+		}
+	case *DeclaredType:
+		panic("should not happen")
+	case *StructType, *PackageType, *ChanType:
+		if cxt.TypeID() == bdt.TypeID() {
+			return // ok
+		}
+	case *TypeType:
+		if cxt.TypeID() == bdt.TypeID() {
+			return // ok
+		}
+	default:
+		panic(fmt.Sprintf(
+			"unexpected type %s",
+			xt.String()))
+	}
+	panic(fmt.Sprintf(
+		"cannot use %s as %s",
+		xt.String(),
+		dt.String()))
+}
+
 // Returns any names not yet defined in expr.
-// These happen upon enter from the top, so value paths cannot be used.
-// If no names are un and x is TypeExpr, evalType(last, x) must not
-// panic.
-// NOTE: has no side effects except for the case of composite type expressions,
-// which must get preprocessed for inner composite type eliding to work.
+// These happen upon enter from the top, so value paths cannot be
+// used.  If no names are un and x is TypeExpr, evalType(last, x)
+// must not panic.
+// NOTE: has no side effects except for the case of composite
+// type expressions, which must get preprocessed for inner
+// composite type eliding to work.
 func findUndefined(imp Importer, last BlockNode, x Expr) (un Name) {
 	return findUndefined2(imp, last, x, nil)
 }
@@ -1310,9 +1995,10 @@ func findUndefined2(imp Importer, last BlockNode, x Expr, t Type) (un Name) {
 				return
 			}
 			// preprocess now for eliding purposes.
-			// TODO recursive preprocessing here is hacky, find a better way.
-			// This cannot be done asynchronously, cuz undefined names ought to
-			// be returned immediately to let the caller predefine it.
+			// TODO recursive preprocessing here is hacky, find a better
+			// way.  This cannot be done asynchronously, cuz undefined
+			// names ought to be returned immediately to let the caller
+			// predefine it.
 			cx.Type = Preprocess(imp, last, cx.Type).(Expr) // recursive
 			ct = evalType(last, cx.Type)
 			// elide composite lit element (nested) composite types.
@@ -1394,6 +2080,26 @@ func findUndefined2(imp Importer, last BlockNode, x Expr, t Type) (un Name) {
 				return
 			}
 		}
+	case *CallExpr:
+		un = findUndefined(imp, last, cx.Func)
+		if un != "" {
+			return
+		}
+		for i := range cx.Args {
+			un = findUndefined(imp, last, cx.Args[i])
+			if un != "" {
+				return
+			}
+		}
+	case *IndexExpr:
+		un = findUndefined(imp, last, cx.X)
+		if un != "" {
+			return
+		}
+		un = findUndefined(imp, last, cx.Index)
+		if un != "" {
+			return
+		}
 	case *constTypeExpr:
 		return
 	case *constExpr:
@@ -1406,56 +2112,124 @@ func findUndefined2(imp Importer, last BlockNode, x Expr, t Type) (un Name) {
 	return
 }
 
-// The purpose of this function is to split declarations into two parts; the
-// first part creates empty placeholder type instances, and the second part
-// to fill in the details while supporting recursive and cyclic definitions.
-// preedefineNow handles the first part while the Preprocessor handles the
-// rest.
-// The exception to this separation is for *ValueDecls, which get
-// preprocessed immediately, recursively, and also the function signature of
-// any function or method declarations.
-func predefineNow(imp Importer, last BlockNode, d Decl) Decl {
+// like checkOrConvertType() but for any integer type.
+func checkOrConvertIntegerType(last BlockNode, x Expr) {
+	if cx, ok := x.(*constExpr); ok {
+		convertConst(last, cx, IntType)
+	} else if x != nil {
+		xt := evalTypeOf(last, x)
+		checkIntegerType(xt)
+	}
+}
+
+// assert that xt can be assigned as an integer type.
+func checkIntegerType(xt Type) {
+	switch xt.Kind() {
+	case IntKind, Int8Kind, Int16Kind, Int32Kind, Int64Kind,
+		UintKind, Uint8Kind, Uint16Kind, Uint32Kind, Uint64Kind,
+		BigintKind:
+		return // ok
+	default:
+		panic(fmt.Sprintf(
+			"expected integer type, but got %v",
+			xt.Kind()))
+	}
+}
+
+// The purpose of this function is to split declarations into two
+// parts; the first part creates empty placeholder type instances,
+// and the second part to execute the rest while supporting
+// recursive and cyclic definitions.
+//
+// predefineNow() completes preprocessing (recursive!) if d is a
+// ValueDecl, as well as any function or method type expressions.
+// Returns true if decl was completey preprocessed, i.e. if it was
+// a ValueDecl.
+func predefineNow(imp Importer, last BlockNode, d Decl) (Decl, bool) {
+	m := make(map[Name]struct{})
+	return predefineNow2(imp, last, d, m)
+}
+
+func predefineNow2(imp Importer, last BlockNode, d Decl, m map[Name]struct{}) (Decl, bool) {
 	pkg := packageOf(last)
+	// pre-register d.GetName() to detect circular definition.
+	m[d.GetName()] = struct{}{}
 	// recursively predefine dependencies.
 	for {
 		un := tryPredefine(imp, last, d)
 		if un != "" {
+			// check circularity.
+			if _, ok := m[un]; ok {
+				panic("constant definition loop")
+			}
 			// look up dependency declaration from fileset.
 			file, decl := pkg.FileSet.GetDeclFor(un)
 			// predefine dependency (recursive).
-			predefineNow(imp, file, *decl)
-			// if value decl, preprocess now (greatly recursive).
-			if vd, ok := (*decl).(*ValueDecl); ok {
-				*decl = Preprocess(imp, file, vd).(Decl)
-			}
+			*decl, _ = predefineNow2(imp, file, *decl, m)
 		} else {
 			break
 		}
 	}
-	if fd, ok := d.(*FuncDecl); ok {
-		// *FuncValue/*FuncType is mostly empty still; here we just fill the
-		// func type.
-		// NOTE: unlike the *ValueDecl case, this case doesn't preprocess d
-		// itself (only d.Type).
-		if !fd.IsMethod {
-			ftv := pkg.GetValueRef(fd.Name)
+	switch cd := d.(type) {
+	case *FuncDecl:
+		// *FuncValue/*FuncType is mostly empty still; here
+		// we just fill the func type (and recv if method).
+		// NOTE: unlike the *ValueDecl case, this case doesn't
+		// preprocess d itself (only d.Type).
+		if cd.IsMethod {
+			if cd.Recv.Name == "" {
+				cd.Recv.Name = "_"
+			}
+			cd.Recv =
+				*Preprocess(imp, last, &cd.Recv).(*FieldTypeExpr)
+			cd.Type =
+				*Preprocess(imp, last, &cd.Type).(*FuncTypeExpr)
+			rft := evalType(last, &cd.Recv).(FieldType)
+			rt := rft.Type
+			ft := evalType(last, &cd.Type).(*FuncType)
+			ft = ft.UnboundType(rft)
+			dt := (*DeclaredType)(nil)
+			if pt, ok := rt.(*PointerType); ok {
+				dt = pt.Elem().(*DeclaredType)
+			} else {
+				dt = rt.(*DeclaredType)
+			}
+			dt.DefineMethod(&FuncValue{
+				Type:       ft,
+				IsMethod:   true,
+				Source:     cd,
+				Name:       cd.Name,
+				Body:       cd.Body,
+				Closure:    nil, // set later, see UpdatePackage().
+				NativeBody: nil,
+				FileName:   filenameOf(last),
+				pkg:        nil, // set later, see UpdatePackage().
+			})
+		} else {
+			ftv := pkg.GetValueRef(cd.Name)
 			ft := ftv.T.(*FuncType)
-			fd.Type = *Preprocess(imp, last, &fd.Type).(*FuncTypeExpr)
-			ft2 := evalType(last, &fd.Type).(*FuncType)
+			cd.Type = *Preprocess(imp, last, &cd.Type).(*FuncTypeExpr)
+			ft2 := evalType(last, &cd.Type).(*FuncType)
 			*ft = *ft2
 			// XXX replace attr w/ ft?
 		}
+		return d, false
+	case *ValueDecl:
+		return Preprocess(imp, last, cd).(Decl), true
+	default:
+		return d, false
 	}
-	return d
 }
 
-// If a dependent name is not yet defined, that name is returned; this return
-// value is used by the caller to enforce declaration order.  If a dependent
-// type is not yet defined (preprocessed), that type is fully preprocessed.
-// Besides defining the type (and immediate dependent types of d) onto last
-// (or packageOf(last)), there are no other side effects.  This function works
-// for all block nodes and must be called for name declarations within
-// (non-file, non-package) stmt bodies.
+// If a dependent name is not yet defined, that name is
+// returned; this return value is used by the caller to
+// enforce declaration order.  If a dependent type is not yet
+// defined (preprocessed), that type is fully preprocessed.
+// Besides defining the type (and immediate dependent types
+// of d) onto last (or packageOf(last)), there are no other
+// side effects.  This function works for all block nodes and
+// must be called for name declarations within (non-file,
+// non-package) stmt bodies.
 func tryPredefine(imp Importer, last BlockNode, d Decl) (un Name) {
 	if d.GetAttribute(ATTR_PREDEFINED) == true {
 		panic("decl node already predefined!")
@@ -1499,9 +2273,13 @@ func tryPredefine(imp Importer, last BlockNode, d Decl) (un Name) {
 		if un != "" {
 			return
 		}
-		last2 := skipFile(last)
-		last2.Define(d.Name, anyValue(nil))
-		d.Path = last.GetPathForName(d.Name)
+		if d.Name == "_" {
+			d.Path.Name = "_"
+		} else {
+			last2 := skipFile(last)
+			last2.Define(d.Name, anyValue(nil))
+			d.Path = last.GetPathForName(d.Name)
+		}
 	case *TypeDecl:
 		// before looking for dependencies, predefine empty type.
 		last2 := skipFile(last)
@@ -1527,7 +2305,7 @@ func tryPredefine(imp Importer, last BlockNode, d Decl) (un Name) {
 			case *NameExpr:
 				if idx, ok := UverseNode().GetLocalIndex(tx.Name); ok {
 					// uverse name
-					tv := Uverse().GetPointerTo(NewValuePath(tx.Name, 0, idx))
+					tv := Uverse().GetPointerTo(NewValuePathUverse(idx, tx.Name))
 					t = tv.GetType()
 				} else if tv := last.GetValueRef(tx.Name); tv != nil {
 					// block name
@@ -1674,7 +2452,7 @@ func filenameOf(n BlockNode) Name {
 func elideCompositeElements(clx *CompositeLitExpr, clt Type) {
 	switch clt := baseOf(clt).(type) {
 	/*
-		case PointerType:
+		case *PointerType:
 			det := clt.Elt.Elt
 			for _, ex := range clx.Elts {
 				vx := evx.Value
@@ -1762,5 +2540,22 @@ func elideCompositeExpr(vx *Expr, vt Type) {
 				}
 			}
 		}
+	}
+}
+
+// returns true of x is exactly `nil`.
+func isNilExpr(x Expr) bool {
+	if nx, ok := x.(*NameExpr); ok {
+		return nx.Name == "nil"
+	}
+	return false
+}
+
+func isNilComparableKind(k Kind) bool {
+	switch k {
+	case SliceKind, MapKind, FuncKind:
+		return true
+	default:
+		return false
 	}
 }

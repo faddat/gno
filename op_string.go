@@ -19,20 +19,20 @@ func _() {
 	_ = x[OpReturnFromBlock-8]
 	_ = x[OpReturnToBlock-9]
 	_ = x[OpDefer-10]
-	_ = x[OpGo-11]
-	_ = x[OpSelectCase-12]
-	_ = x[OpSwitchCase-13]
-	_ = x[OpTypeSwitchCase-14]
-	_ = x[OpForLoop1-15]
-	_ = x[OpIfCond-16]
-	_ = x[OpPopValue-17]
-	_ = x[OpPopResults-18]
-	_ = x[OpPopBlock-19]
+	_ = x[OpCallDeferNativeBody-11]
+	_ = x[OpGo-12]
+	_ = x[OpSelect-13]
+	_ = x[OpSwitchClause-14]
+	_ = x[OpTypeSwitchClause-15]
+	_ = x[OpForLoop1-16]
+	_ = x[OpIfCond-17]
+	_ = x[OpPopValue-18]
+	_ = x[OpPopResults-19]
+	_ = x[OpPopBlock-20]
 	_ = x[OpUpos-32]
 	_ = x[OpUneg-33]
 	_ = x[OpUnot-34]
 	_ = x[OpUxor-35]
-	_ = x[OpUstar-36]
 	_ = x[OpUrecv-37]
 	_ = x[OpLor-38]
 	_ = x[OpLand-39]
@@ -55,21 +55,22 @@ func _() {
 	_ = x[OpBandn-56]
 	_ = x[OpEval-64]
 	_ = x[OpBinary1-65]
-	_ = x[OpIndex-66]
-	_ = x[OpSelector-67]
-	_ = x[OpSlice-68]
-	_ = x[OpStar-69]
-	_ = x[OpRef-70]
-	_ = x[OpTypeAssert1-71]
-	_ = x[OpTypeAssert2-72]
-	_ = x[OpTypeOf-73]
-	_ = x[OpCompositeLit-74]
-	_ = x[OpArrayLit-75]
-	_ = x[OpSliceLit-76]
-	_ = x[OpMapLit-77]
-	_ = x[OpStructLit-78]
-	_ = x[OpFuncLit-79]
-	_ = x[OpConvert-80]
+	_ = x[OpIndex1-66]
+	_ = x[OpIndex2-67]
+	_ = x[OpSelector-68]
+	_ = x[OpSlice-69]
+	_ = x[OpStar-70]
+	_ = x[OpRef-71]
+	_ = x[OpTypeAssert1-72]
+	_ = x[OpTypeAssert2-73]
+	_ = x[OpTypeOf-74]
+	_ = x[OpCompositeLit-75]
+	_ = x[OpArrayLit-76]
+	_ = x[OpSliceLit-77]
+	_ = x[OpMapLit-78]
+	_ = x[OpStructLit-79]
+	_ = x[OpFuncLit-80]
+	_ = x[OpConvert-81]
 	_ = x[OpStructLitGoNative-96]
 	_ = x[OpCallGoNative-97]
 	_ = x[OpFieldType-112]
@@ -98,56 +99,64 @@ func _() {
 	_ = x[OpDec-142]
 	_ = x[OpValueDecl-144]
 	_ = x[OpSticky-208]
-	_ = x[OpForLoop2-208]
-	_ = x[OpRangeIter-209]
-	_ = x[OpReturnCallDefers-210]
+	_ = x[OpBody-209]
+	_ = x[OpForLoop2-210]
+	_ = x[OpRangeIter-211]
+	_ = x[OpRangeIterString-212]
+	_ = x[OpRangeIterMap-213]
+	_ = x[OpReturnCallDefers-214]
 }
 
 const (
-	_Op_name_0 = "OpInvalidOpHaltOpNoopOpExecOpPrecallOpCallOpCallNativeBodyOpReturnOpReturnFromBlockOpReturnToBlockOpDeferOpGoOpSelectCaseOpSwitchCaseOpTypeSwitchCaseOpForLoop1OpIfCondOpPopValueOpPopResultsOpPopBlock"
-	_Op_name_1 = "OpUposOpUnegOpUnotOpUxorOpUstarOpUrecvOpLorOpLandOpEqlOpNeqOpLssOpLeqOpGtrOpGeqOpAddOpSubOpBorOpXorOpMulOpQuoOpRemOpShlOpShrOpBandOpBandn"
-	_Op_name_2 = "OpEvalOpBinary1OpIndexOpSelectorOpSliceOpStarOpRefOpTypeAssert1OpTypeAssert2OpTypeOfOpCompositeLitOpArrayLitOpSliceLitOpMapLitOpStructLitOpFuncLitOpConvert"
-	_Op_name_3 = "OpStructLitGoNativeOpCallGoNative"
-	_Op_name_4 = "OpFieldTypeOpArrayTypeOpSliceTypeOpPointerTypeOpInterfaceTypeOpChanTypeOpFuncTypeOpMapTypeOpStructType"
-	_Op_name_5 = "OpAssignOpAddAssignOpSubAssignOpMulAssignOpQuoAssignOpRemAssignOpBandAssignOpBandnAssignOpBorAssignOpXorAssignOpShlAssignOpShrAssignOpDefineOpIncOpDec"
-	_Op_name_6 = "OpValueDecl"
-	_Op_name_7 = "OpStickyOpRangeIterOpReturnCallDefers"
+	_Op_name_0 = "OpInvalidOpHaltOpNoopOpExecOpPrecallOpCallOpCallNativeBodyOpReturnOpReturnFromBlockOpReturnToBlockOpDeferOpCallDeferNativeBodyOpGoOpSelectOpSwitchClauseOpTypeSwitchClauseOpForLoop1OpIfCondOpPopValueOpPopResultsOpPopBlock"
+	_Op_name_1 = "OpUposOpUnegOpUnotOpUxor"
+	_Op_name_2 = "OpUrecvOpLorOpLandOpEqlOpNeqOpLssOpLeqOpGtrOpGeqOpAddOpSubOpBorOpXorOpMulOpQuoOpRemOpShlOpShrOpBandOpBandn"
+	_Op_name_3 = "OpEvalOpBinary1OpIndex1OpIndex2OpSelectorOpSliceOpStarOpRefOpTypeAssert1OpTypeAssert2OpTypeOfOpCompositeLitOpArrayLitOpSliceLitOpMapLitOpStructLitOpFuncLitOpConvert"
+	_Op_name_4 = "OpStructLitGoNativeOpCallGoNative"
+	_Op_name_5 = "OpFieldTypeOpArrayTypeOpSliceTypeOpPointerTypeOpInterfaceTypeOpChanTypeOpFuncTypeOpMapTypeOpStructType"
+	_Op_name_6 = "OpAssignOpAddAssignOpSubAssignOpMulAssignOpQuoAssignOpRemAssignOpBandAssignOpBandnAssignOpBorAssignOpXorAssignOpShlAssignOpShrAssignOpDefineOpIncOpDec"
+	_Op_name_7 = "OpValueDecl"
+	_Op_name_8 = "OpStickyOpBodyOpForLoop2OpRangeIterOpRangeIterStringOpRangeIterMapOpReturnCallDefers"
 )
 
 var (
-	_Op_index_0 = [...]uint8{0, 9, 15, 21, 27, 36, 42, 58, 66, 83, 98, 105, 109, 121, 133, 149, 159, 167, 177, 189, 199}
-	_Op_index_1 = [...]uint8{0, 6, 12, 18, 24, 31, 38, 43, 49, 54, 59, 64, 69, 74, 79, 84, 89, 94, 99, 104, 109, 114, 119, 124, 130, 137}
-	_Op_index_2 = [...]uint8{0, 6, 15, 22, 32, 39, 45, 50, 63, 76, 84, 98, 108, 118, 126, 137, 146, 155}
-	_Op_index_3 = [...]uint8{0, 19, 33}
-	_Op_index_4 = [...]uint8{0, 11, 22, 33, 46, 61, 71, 81, 90, 102}
-	_Op_index_5 = [...]uint8{0, 8, 19, 30, 41, 52, 63, 75, 88, 99, 110, 121, 132, 140, 145, 150}
-	_Op_index_7 = [...]uint8{0, 8, 19, 37}
+	_Op_index_0 = [...]uint8{0, 9, 15, 21, 27, 36, 42, 58, 66, 83, 98, 105, 126, 130, 138, 152, 170, 180, 188, 198, 210, 220}
+	_Op_index_1 = [...]uint8{0, 6, 12, 18, 24}
+	_Op_index_2 = [...]uint8{0, 7, 12, 18, 23, 28, 33, 38, 43, 48, 53, 58, 63, 68, 73, 78, 83, 88, 93, 99, 106}
+	_Op_index_3 = [...]uint8{0, 6, 15, 23, 31, 41, 48, 54, 59, 72, 85, 93, 107, 117, 127, 135, 146, 155, 164}
+	_Op_index_4 = [...]uint8{0, 19, 33}
+	_Op_index_5 = [...]uint8{0, 11, 22, 33, 46, 61, 71, 81, 90, 102}
+	_Op_index_6 = [...]uint8{0, 8, 19, 30, 41, 52, 63, 75, 88, 99, 110, 121, 132, 140, 145, 150}
+	_Op_index_8 = [...]uint8{0, 8, 14, 24, 35, 52, 66, 84}
 )
 
 func (i Op) String() string {
 	switch {
-	case 0 <= i && i <= 19:
+	case 0 <= i && i <= 20:
 		return _Op_name_0[_Op_index_0[i]:_Op_index_0[i+1]]
-	case 32 <= i && i <= 56:
+	case 32 <= i && i <= 35:
 		i -= 32
 		return _Op_name_1[_Op_index_1[i]:_Op_index_1[i+1]]
-	case 64 <= i && i <= 80:
-		i -= 64
+	case 37 <= i && i <= 56:
+		i -= 37
 		return _Op_name_2[_Op_index_2[i]:_Op_index_2[i+1]]
+	case 64 <= i && i <= 81:
+		i -= 64
+		return _Op_name_3[_Op_index_3[i]:_Op_index_3[i+1]]
 	case 96 <= i && i <= 97:
 		i -= 96
-		return _Op_name_3[_Op_index_3[i]:_Op_index_3[i+1]]
+		return _Op_name_4[_Op_index_4[i]:_Op_index_4[i+1]]
 	case 112 <= i && i <= 120:
 		i -= 112
-		return _Op_name_4[_Op_index_4[i]:_Op_index_4[i+1]]
+		return _Op_name_5[_Op_index_5[i]:_Op_index_5[i+1]]
 	case 128 <= i && i <= 142:
 		i -= 128
-		return _Op_name_5[_Op_index_5[i]:_Op_index_5[i+1]]
+		return _Op_name_6[_Op_index_6[i]:_Op_index_6[i+1]]
 	case i == 144:
-		return _Op_name_6
-	case 208 <= i && i <= 210:
+		return _Op_name_7
+	case 208 <= i && i <= 214:
 		i -= 208
-		return _Op_name_7[_Op_index_7[i]:_Op_index_7[i+1]]
+		return _Op_name_8[_Op_index_8[i]:_Op_index_8[i+1]]
 	default:
 		return "Op(" + strconv.FormatInt(int64(i), 10) + ")"
 	}

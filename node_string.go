@@ -2,7 +2,6 @@ package gno
 
 import (
 	"fmt"
-	"strings"
 )
 
 //----------------------------------------
@@ -66,15 +65,36 @@ func (w Word) TokenString() string {
 // Node.String()
 
 func (p ValuePath) String() string {
-	if p.Depth == 0 {
-		return fmt.Sprintf("#%d", p.Index)
-	} else {
-		return fmt.Sprintf("%s%d", strings.Repeat("@", int(p.Depth)), p.Index)
+	switch p.Type {
+	case VPUverse:
+		return fmt.Sprintf("VPUverse(%d)", p.Index)
+	case VPBlock:
+		return fmt.Sprintf("VPBlock(%d,%d)", p.Depth, p.Index)
+	case VPField:
+		return fmt.Sprintf("VPField(%d,%d,%s)", p.Depth, p.Index, p.Name)
+	case VPValMethod:
+		return fmt.Sprintf("VPValMethod(%d,%s)", p.Index, p.Name)
+	case VPPtrMethod:
+		return fmt.Sprintf("VPPtrMethod(%d,%s)", p.Index, p.Name)
+	case VPInterface:
+		return fmt.Sprintf("VPInterface(%s)", p.Name)
+	case VPDerefField:
+		return fmt.Sprintf("VPDerefField(%d,%d,%s)", p.Depth, p.Index, p.Name)
+	case VPDerefValMethod:
+		return fmt.Sprintf("VPDerefValMethod(%d,%s)", p.Index, p.Name)
+	case VPDerefPtrMethod:
+		return fmt.Sprintf("VPDerefPtrMethod(%d,%s)", p.Index, p.Name)
+	case VPDerefInterface:
+		return fmt.Sprintf("VPDerefInterface(%s)", p.Name)
+	case VPNative:
+		return fmt.Sprintf("VPNative(%s)", p.Name)
+	default:
+		panic("illegal_value_type")
 	}
 }
 
 func (n NameExpr) String() string {
-	return fmt.Sprintf("%s%s", n.Name, n.Path.String())
+	return fmt.Sprintf("%s<%s>", n.Name, n.Path.String())
 }
 
 func (n BasicLitExpr) String() string {
@@ -106,19 +126,37 @@ func (n SelectorExpr) String() string {
 }
 
 func (n SliceExpr) String() string {
-	return fmt.Sprintf("%s[%s:%s:%s]", n.X, n.Low, n.High, n.Max)
+	ls, hs, ms := "", "", ""
+	if n.Low != nil {
+		ls = n.Low.String()
+	}
+	if n.High != nil {
+		hs = n.High.String()
+	}
+	if n.Max != nil {
+		ms = n.Max.String()
+	}
+	if ms == "" {
+		return fmt.Sprintf("%s[%s:%s]", n.X, ls, hs)
+	} else {
+		return fmt.Sprintf("%s[%s:%s:%s]", n.X, ls, hs, ms)
+	}
 }
 
 func (n StarExpr) String() string {
-	return fmt.Sprintf("*%s", n.X)
+	return fmt.Sprintf("*(%s)", n.X)
 }
 
 func (n RefExpr) String() string {
-	return fmt.Sprintf("&%s", n.X)
+	return fmt.Sprintf("&(%s)", n.X)
 }
 
 func (n TypeAssertExpr) String() string {
-	return fmt.Sprintf("%s.(%s)", n.X, n.Type)
+	if n.Type == nil {
+		return fmt.Sprintf("%s.(%s)", n.X, n.Type)
+	} else {
+		return fmt.Sprintf("%s.(type)", n.X)
+	}
 }
 
 func (n UnaryExpr) String() string {
@@ -253,14 +291,18 @@ func (n IfStmt) String() string {
 		init = n.Init.String() + "; "
 	}
 	cond := n.Cond.String()
-	body := n.Body.String()
+	then := n.Then.String()
 	els_ := n.Else.String()
-	if n.Else == nil {
-		return fmt.Sprintf("if %s%s { %s }", init, cond, body)
+	if n.Else.Body == nil {
+		return fmt.Sprintf("if %s%s { %s }", init, cond, then)
 	} else {
 		return fmt.Sprintf("if %s%s { %s } else { %s }",
-			init, cond, body, els_)
+			init, cond, then, els_)
 	}
+}
+
+func (n IfCaseStmt) String() string {
+	return n.Body.String()
 }
 
 func (n IncDecStmt) String() string {
@@ -333,7 +375,7 @@ func (n SwitchStmt) String() string {
 		varName = string(n.VarName) + ":="
 	}
 	cases := ""
-	for i, s := range n.Cases {
+	for i, s := range n.Clauses {
 		if i == 0 {
 			cases += s.String()
 		} else {
@@ -344,8 +386,12 @@ func (n SwitchStmt) String() string {
 		init, varName, n.X.String(), cases)
 }
 
-func (n SwitchCaseStmt) String() string {
-	return fmt.Sprintf("case %v: %s", n.Cases, n.Body.String())
+func (n SwitchClauseStmt) String() string {
+	if len(n.Cases) == 0 {
+		return fmt.Sprintf("default: %s", n.Body.String())
+	} else {
+		return fmt.Sprintf("case %v: %s", n.Cases, n.Body.String())
+	}
 }
 
 func (n FuncDecl) String() string {
@@ -390,7 +436,7 @@ func (n TypeDecl) String() string {
 }
 
 func (n FileNode) String() string {
-	return fmt.Sprintf("file{ package %s; %s }", n.PkgName, n.Body.String())
+	return fmt.Sprintf("file{ package %s; %s }", n.PkgName, n.Decls.String())
 }
 
 func (n PackageNode) String() string {
@@ -437,7 +483,7 @@ func (kvs KeyValueExprs) String() string {
 	return str
 }
 
-func (ss Stmts) String() string {
+func (ss Body) String() string {
 	str := ""
 	for i, s := range ss {
 		if i == 0 {
@@ -471,4 +517,8 @@ func (ds SimpleDecls) String() string {
 		}
 	}
 	return str
+}
+
+func (cx constExpr) String() string {
+	return fmt.Sprintf("(const %s)", cx.TypedValue.String())
 }

@@ -15,12 +15,11 @@ type Frame struct {
 	NumExprs  int  // number of exprs in stack
 	NumStmts  int  // number of statements in stack
 	NumBlocks int  // number of blocks in stack
-	BodyIndex int  // for call and for stmts
 
 	// call frame
 	Func        *FuncValue    // function value
 	GoFunc      *nativeValue  // go function value
-	Receiver    Value         // if bound method
+	Receiver    TypedValue    // if bound method
 	NumArgs     int           // number of arguments in call
 	IsVarg      bool          // is form fncall(???, vargs...)
 	Defers      []Defer       // deferred calls
@@ -62,6 +61,19 @@ func (fr Frame) String() string {
 	}
 }
 
+func (fr *Frame) PushDefer(dfr Defer) {
+	fr.Defers = append(fr.Defers, dfr)
+}
+
+func (fr *Frame) PopDefer() (res Defer, ok bool) {
+	if len(fr.Defers) > 0 {
+		ok = true
+		res = fr.Defers[len(fr.Defers)-1]
+		fr.Defers = fr.Defers[:len(fr.Defers)-1]
+	}
+	return
+}
+
 //----------------------------------------
 // Defer
 
@@ -69,4 +81,5 @@ type Defer struct {
 	Func   *FuncValue   // function value
 	GoFunc *nativeValue // go function value
 	Args   []TypedValue // arguments
+	Source *DeferStmt   // source
 }
